@@ -1,0 +1,38 @@
+services:
+  frontend:
+    build:
+      context: ./src/frontend
+      dockerfile: dockerfile
+    ports:
+      - "6767:6767"
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: ./src/backend
+      dockerfile: dockerfile
+    ports:
+      - "6969:6969"
+    environment:
+      DATABASE_URL: postgres://app:secret@database:5432/app?sslmode=disable
+    depends_on:
+      database:
+        condition: service_healthy
+
+  database:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
