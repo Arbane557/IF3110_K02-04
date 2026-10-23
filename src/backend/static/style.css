@@ -1,0 +1,26 @@
+body {
+    max-width: 480px;
+    margin: 40px auto;
+    padding: 0 16px;
+    font-family: sans-serif;
+}
+
+form,
+label {
+    display: grid;
+    gap: 8px;
+}
+
+form {
+    gap: 16px;
+}
+
+input,
+button {
+    padding: 8px;
+    font: inherit;
+}
+
+.error {
+    color: #b00020;
+}

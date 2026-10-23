@@ -1,28 +1,32 @@
-// hold api routing for other backend
-
 package main
 
 import (
 	"context"
 	"database/sql"
+	"html/template"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"time"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type App struct {
-	InternalDB *sql.db
+	InternalDB *sql.DB
+	Templates  *template.Template
 }
 
 func main() {
-	if os.Getenv("DATABASE_URL") == "" {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
 		log.Fatal("DATABASE_URL is required")
 	}
-	db, err := sql.Open("pgx", os.Getenv("DATABASE_URL"))
 
+	internalDB, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		log.Fatal("open database:", err)
+	}
 	defer internalDB.Close()
 
 	internalDB.SetMaxOpenConns(20)
@@ -31,13 +35,28 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if err := internalDB.PingContext(ctx); err != nil {
+		log.Fatal("connect database:", err)
+	}
+
+	templates, err := template.ParseGlob("templates/*.html")
+	if err != nil {
+		log.Fatal("parse templates:", err)
+	}
 
 	app := &App{
-		InternalDB: internalDB
+		InternalDB: internalDB,
+		Templates:  templates,
+	}
+	server := &http.Server{
+		Addr:              ":6969",
+		Handler:           app.routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
-	server := &http.Server {
-		Address ":6969",
-		Handler app.routes(),
-	}
+	log.Println("server running on http://localhost:6969")
+	log.Fatal(server.ListenAndServe())
 }
