@@ -1,0 +1,38 @@
+body {
+  max-width: 520px;
+  margin: 40px auto;
+  padding: 0 16px;
+  font-family: sans-serif;
+}
+
+form,
+label {
+  display: grid;
+  gap: 8px;
+}
+
+form {
+  gap: 16px;
+}
+
+input,
+button {
+  padding: 8px;
+  font: inherit;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+pre {
+  min-height: 100px;
+  margin-top: 16px;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid #999;
+  background: #eee;
+  white-space: pre-wrap;
+}
