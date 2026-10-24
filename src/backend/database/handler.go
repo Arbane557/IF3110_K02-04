@@ -285,8 +285,6 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
-// Keep request-only secrets outside DatabaseConfig's JSON representation so a
-// successful create/update can never echo a password back to the caller.
 type databaseConfigRequest struct {
 	Name         string `json:"name"`
 	Host         string `json:"host"`

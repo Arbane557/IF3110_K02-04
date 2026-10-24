@@ -19,12 +19,13 @@ type DatabaseConfig struct {
 	DatabaseName string     `json:"databaseName"`
 	Username     string     `json:"username"`
 	SSLMode      string     `json:"sslMode"`
-	// Password is accepted on create/update and used only in memory to open a
-	// target pool. It is never serialized or returned by this package.
-	Password  string    `json:"-"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Password     string     `json:"-"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	UpdatedAt    time.Time  `json:"updatedAt"`
 }
+
+// Password is accepted on create/update and used only in memory to open a
+// target pool. It is never serialized or returned by this package.
 
 type DatabaseSummary struct {
 	ID   DatabaseID `json:"id"`
