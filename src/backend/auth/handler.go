@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -37,6 +38,36 @@ func (h *Handler) RequireAuth(next http.Handler) http.Handler {
 	})
 }
 
+// RequireAuthAdmin allows only authenticated platform admins to continue.
+func (h *Handler) RequireAuthAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie(sessionCookieName)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, err := h.service.UserBySession(r.Context(), cookie.Value)
+		if err != nil {
+			clearSessionCookie(w)
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if user.Role != RoleAdmin {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (h *Handler) UserFromRequest(r *http.Request) (User, error) {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return User{}, err
+	}
+	return h.service.UserBySession(r.Context(), cookie.Value)
+}
+
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		h.renderLogin(w, http.StatusBadRequest, "Bad request")
@@ -61,7 +92,11 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setSessionCookie(w, token, expiresAt)
-	http.Redirect(w, r, "/databases", http.StatusSeeOther)
+	destination := "/databases"
+	if user.Role == RoleAdmin {
+		destination = "/auth"
+	}
+	http.Redirect(w, r, destination, http.StatusSeeOther)
 }
 
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +122,46 @@ func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, user)
+}
+
+type registerUserRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func (h *Handler) RegisterUser(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	defer r.Body.Close()
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var request registerUserRequest
+	if err := decoder.Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	user, err := h.service.CreateUser(r.Context(), request.Username, request.Password)
+	switch {
+	case errors.Is(err, ErrInvalidUser):
+		writeError(w, http.StatusBadRequest, "username or password does not meet requirements")
+	case errors.Is(err, ErrUsernameTaken):
+		writeError(w, http.StatusConflict, "username already exists")
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "could not create user")
+	default:
+		writeJSON(w, http.StatusCreated, user)
+	}
+}
+
+func (h *Handler) UsersPage(w http.ResponseWriter, r *http.Request) {
+	if err := h.viewer.RenderUsers(w); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
 }
 
 func (h *Handler) AuthPage(w http.ResponseWriter, r *http.Request) {

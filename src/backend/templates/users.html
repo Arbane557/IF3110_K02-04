@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User management</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <main>
+        <nav class="topbar">
+            <a href="/databases">Databases</a>
+            <a href="/migrations">Migrations</a>
+            <form method="post" action="/logout"><button type="submit">Logout</button></form>
+        </nav>
+        <h1>User management</h1>
+        <form id="register-form">
+            <label>Username<input name="username" required maxlength="100" autocomplete="username"></label>
+            <label>Password<input name="password" type="password" required minlength="8" maxlength="72" autocomplete="new-password"></label>
+            <button type="submit">Create user</button>
+        </form>
+        <p id="register-status" class="status" role="status" aria-live="polite"></p>
+    </main>
+    <script>
+        const form = document.querySelector("#register-form");
+        const status = document.querySelector("#register-status");
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            status.textContent = "Creating user…";
+            const values = Object.fromEntries(new FormData(form));
+            try {
+                const response = await fetch("/api/auth/register", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(values),
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
+                form.reset();
+                status.textContent = `Created user ${result.username}.`;
+            } catch (error) {
+                status.textContent = error.message;
+            }
+        });
+    </script>
+</body>
+</html>

@@ -5,6 +5,7 @@ services:
       - "6969:6969"
     environment:
       DATABASE_URL: postgres://app:secret@database:5432/app?sslmode=disable
+      DATABASE_CREDENTIAL_KEY: "0123456789abcdef0123456789abcdef"
     depends_on:
       database:
         condition: service_healthy
@@ -23,6 +24,18 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    
+  target-db-1:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: tes1
+      POSTGRES_USER: tes1
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5433:5432"
+    volumes:
+      - target_data:/var/lib/postgresql/data
 
 volumes:
   postgres_data:
+  target_data:

@@ -7,15 +7,32 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
+	"strings"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+var (
+	ErrInvalidUser  = errors.New("invalid user")
+	ErrUsernameTaken = errors.New("username already exists")
 )
 
 // User is the authenticated account exposed to the application layer.
 type User struct {
 	ID       int64  `json:"id"`
 	Username string `json:"username"`
-	IsAdmin  bool   `json:"isAdmin"`
+	Role     Role   `json:"role"`
 }
+
+type Role string
+
+const (
+	RoleAdmin Role = "ADMIN"
+	RoleUser  Role = "USER"
+)
 
 // Service handles account lookup and server-side session persistence.
 type Service struct {
@@ -29,12 +46,41 @@ func NewService(db *sql.DB) *Service {
 func (s *Service) FindUserByUsername(ctx context.Context, username string) (User, string, error) {
 	var user User
 	var passwordHash string
+	var isAdmin bool
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, username, password_hash, is_admin
 		FROM users
 		WHERE username = $1
-	`, username).Scan(&user.ID, &user.Username, &passwordHash, &user.IsAdmin)
+	`, username).Scan(&user.ID, &user.Username, &passwordHash, &isAdmin)
+	user.Role = roleForAdminFlag(isAdmin)
 	return user, passwordHash, err
+}
+
+func (s *Service) CreateUser(ctx context.Context, username, password string) (User, error) {
+	username = strings.TrimSpace(username)
+	if username == "" || utf8.RuneCountInString(username) > 100 ||
+		utf8.RuneCountInString(password) < 8 || len(password) > 72 {
+		return User{}, ErrInvalidUser
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return User{}, err
+	}
+
+	var user User
+	var isAdmin bool
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO users (username, password_hash)
+		VALUES ($1, $2)
+		ON CONFLICT (username) DO NOTHING
+		RETURNING id, username, is_admin
+	`, username, string(passwordHash)).Scan(&user.ID, &user.Username, &isAdmin)
+	user.Role = roleForAdminFlag(isAdmin)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrUsernameTaken
+	}
+	return user, err
 }
 
 func (s *Service) CreateSession(ctx context.Context, user User) (string, time.Time, error) {
@@ -55,6 +101,7 @@ func (s *Service) CreateSession(ctx context.Context, user User) (string, time.Ti
 
 func (s *Service) UserBySession(ctx context.Context, token string) (User, error) {
 	var user User
+	var isAdmin bool
 	tokenHash := hashToken(token)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT u.id, u.username, u.is_admin
@@ -64,10 +111,11 @@ func (s *Service) UserBySession(ctx context.Context, token string) (User, error)
 		  AND s.revoked_at IS NULL
 		  AND s.idle_expires_at > NOW()
 		  AND s.absolute_expires_at > NOW()
-	`, tokenHash).Scan(&user.ID, &user.Username, &user.IsAdmin)
+	`, tokenHash).Scan(&user.ID, &user.Username, &isAdmin)
 	if err != nil {
 		return User{}, err
 	}
+	user.Role = roleForAdminFlag(isAdmin)
 
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE sessions
@@ -76,6 +124,13 @@ func (s *Service) UserBySession(ctx context.Context, token string) (User, error)
 		WHERE token_hash = $1
 	`, tokenHash)
 	return user, err
+}
+
+func roleForAdminFlag(isAdmin bool) Role {
+	if isAdmin {
+		return RoleAdmin
+	}
+	return RoleUser
 }
 
 func (s *Service) RevokeSession(ctx context.Context, token string) error {

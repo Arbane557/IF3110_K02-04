@@ -1,6 +1,9 @@
 package main
 
-import "net/http"
+import (
+	"encoding/json"
+	"net/http"
+)
 
 func (app *App) routes() http.Handler {
 	mux := http.NewServeMux()
@@ -13,6 +16,11 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /login", app.Auth.Login)
 	mux.HandleFunc("POST /logout", app.Auth.Logout)
 	mux.HandleFunc("GET /whoami", app.Auth.Whoami)
+	mux.Handle("GET /auth", app.Auth.RequireAuthAdmin(http.HandlerFunc(app.Auth.UsersPage)))
+	mux.Handle(
+		"POST /api/auth/register",
+		app.Auth.RequireAuthAdmin(http.HandlerFunc(app.Auth.RegisterUser)),
+	)
 	mux.Handle(
 		"GET /databases",
 		app.Auth.RequireAuth(http.HandlerFunc(app.DatabasePage.DatabasePage)),
@@ -48,5 +56,11 @@ func (app *App) healthHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status": "ok",
 	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 

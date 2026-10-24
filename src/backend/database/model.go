@@ -1,7 +1,5 @@
 // Package database contains the PostgreSQL target-database registry,
-// connection manager, and read-only viewer. It deliberately does not import
-// the application's auth or migration packages; those integrations happen
-// through the interfaces declared here and in the application routes.go.
+// connection manager, and read-only viewer.
 package database
 
 import (
@@ -19,6 +17,7 @@ type DatabaseConfig struct {
 	DatabaseName string     `json:"databaseName"`
 	Username     string     `json:"username"`
 	SSLMode      string     `json:"sslMode"`
+	AccessRoles  []string   `json:"accessRoles"`
 	Password     string     `json:"-"`
 	CreatedAt    time.Time  `json:"createdAt"`
 	UpdatedAt    time.Time  `json:"updatedAt"`
@@ -28,9 +27,15 @@ type DatabaseConfig struct {
 // target pool. It is never serialized or returned by this package.
 
 type DatabaseSummary struct {
-	ID   DatabaseID `json:"id"`
-	Name string     `json:"name"`
+	ID          DatabaseID `json:"id"`
+	Name        string     `json:"name"`
+	AccessRoles []string   `json:"accessRoles"`
 }
+
+const (
+	RoleAdmin = "ADMIN"
+	RoleUser  = "USER"
+)
 
 type Schema struct {
 	Name string `json:"name"`
