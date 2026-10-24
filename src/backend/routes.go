@@ -42,6 +42,9 @@ func (app *App) registerDatabaseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/databases/{databaseID}/schemas/{schema}/tables", app.DatabaseAPI.ListTables)
 	mux.HandleFunc("GET /api/databases/{databaseID}/schemas/{schema}/tables/{table}", app.DatabaseAPI.GetTableDetails)
 	mux.HandleFunc("GET /api/databases/{databaseID}/schemas/{schema}/tables/{table}/rows", app.DatabaseAPI.GetRows)
+	if app.Migration != nil {
+		app.Migration.RegisterRoutes(mux)
+	}
 }
 
 func (app *App) healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -49,4 +52,3 @@ func (app *App) healthHandler(w http.ResponseWriter, r *http.Request) {
 		"status": "ok",
 	})
 }
-
