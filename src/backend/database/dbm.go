@@ -297,7 +297,6 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	}
 }
 
-
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

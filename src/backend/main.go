@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"html/template"
 	"log"
 	"net/http"
@@ -48,11 +49,27 @@ func main() {
 	if err != nil {
 		log.Fatal("parse templates:", err)
 	}
+	keyText := os.Getenv("CREDENTIAL_ENCRYPTION_KEY")
+	key, err := hex.DecodeString(keyText)
+	if err != nil || len(key) != 32 {
+		log.Fatal("CREDENTIAL_ENCRYPTION_KEY must be 64 hexadecimal characters")
+	}
+	protector, err := database.NewAESGCMProtector(key)
+	if err != nil {
+		log.Fatal("create credential protector:", err)
+	}
+	registryRepository := database.NewPostgresRegistryRepository(internalDB)
+	connectionManager := database.NewConnectionManager(registryRepository, protector)
+	access := database.NewAccessService(internalDB)
+	registry := database.NewRegistryService(registryRepository, connectionManager, protector)
+	catalog := database.NewCatalogService(connectionManager)
+	migrationService := migration.NewService(connectionManager)
 
 	app := &App{
-		Auth:          auth.NewHandler(auth.NewService(internalDB), auth.NewViewer(templates)),
-		DatabasePage:  database.NewViewer(templates),
-		Migration:     migration.NewHandler(migration.NewViewer(templates)),
+		Auth:         auth.NewHandler(auth.NewService(internalDB), auth.NewViewer(templates)),
+		DatabasePage: database.NewViewer(templates),
+		DatabaseAPI:  database.NewHandler(registry, catalog, access),
+		Migration:    migration.NewHandlerWithAPI(migration.NewViewer(templates), migrationService, access),
 	}
 
 	credentialKey := []byte(os.Getenv("DATABASE_CREDENTIAL_KEY"))
