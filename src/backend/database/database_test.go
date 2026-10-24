@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"wbd/backend/auth"
 )
 
 type memoryRegistryRepository struct {
@@ -59,26 +61,17 @@ func (r *memoryRegistryRepository) Delete(_ context.Context, id DatabaseID) erro
 }
 
 type testAuthorizer struct {
-	principal    Principal
+	principal    auth.Principal
 	principalErr error
 	authorizeErr error
 }
 
-func (a testAuthorizer) PrincipalFromRequest(*http.Request) (Principal, error) {
+func (a testAuthorizer) PrincipalFromRequest(*http.Request) (auth.Principal, error) {
 	return a.principal, a.principalErr
 }
 
-func (a testAuthorizer) AuthorizeDatabase(context.Context, Principal, DatabaseID, string) error {
+func (a testAuthorizer) AuthorizeDatabase(context.Context, auth.Principal, int64, string) error {
 	return a.authorizeErr
-}
-
-func testProtector(t *testing.T) CredentialProtector {
-	t.Helper()
-	protector, err := NewAESGCMProtector([]byte("0123456789abcdef0123456789abcdef"))
-	if err != nil {
-		t.Fatalf("new protector: %v", err)
-	}
-	return protector
 }
 
 func validConfig() DatabaseConfig {
@@ -89,7 +82,7 @@ func validConfig() DatabaseConfig {
 	}
 }
 
-func TestRegistryCreateEncryptsCredentialAndUpdateRetainsIt(t *testing.T) {
+func TestRegistryCreateStoresCredentialAndUpdateRetainsIt(t *testing.T) {
 	repository := newMemoryRegistryRepository()
 	protector := testProtector(t)
 	manager := NewConnectionManager(repository, protector)
@@ -127,6 +120,21 @@ func TestRegistryCreateEncryptsCredentialAndUpdateRetainsIt(t *testing.T) {
 	}
 }
 
+func testProtector(t *testing.T) CredentialProtector {
+	t.Helper()
+	protector, err := NewAESGCMProtector([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil { t.Fatalf("new protector: %v", err) }
+	return protector
+}
+
+func TestCredentialProtectorRejectsTamperedCiphertext(t *testing.T) {
+	protector := testProtector(t)
+	ciphertext, err := protector.Seal("secret")
+	if err != nil { t.Fatalf("seal: %v", err) }
+	ciphertext[len(ciphertext)-1] ^= 1
+	if _, err := protector.Open(ciphertext); err == nil { t.Fatal("tampered ciphertext was accepted") }
+}
+
 func TestRegistryRejectsInvalidConfiguration(t *testing.T) {
 	tests := []DatabaseConfig{
 		{},
@@ -137,18 +145,6 @@ func TestRegistryRejectsInvalidConfiguration(t *testing.T) {
 		if !errors.Is(validateConfig(config, true), ErrInvalidConfig) {
 			t.Fatalf("config %+v was accepted", config)
 		}
-	}
-}
-
-func TestCredentialProtectorRejectsTamperedCiphertext(t *testing.T) {
-	protector := testProtector(t)
-	ciphertext, err := protector.Seal("secret")
-	if err != nil {
-		t.Fatalf("seal: %v", err)
-	}
-	ciphertext[len(ciphertext)-1] ^= 1
-	if _, err := protector.Open(ciphertext); err == nil {
-		t.Fatal("tampered ciphertext was accepted")
 	}
 }
 
@@ -165,7 +161,7 @@ func TestTargetDSNPreservesEscapedCredentials(t *testing.T) {
 }
 
 func TestCreateDatabaseHandlerRejectsNonAdmin(t *testing.T) {
-	handler := NewHandler(nil, nil, testAuthorizer{principal: Principal{UserID: 1}})
+	handler := NewHandler(nil, nil, testAuthorizer{principal: auth.Principal{UserID: 1}})
 	request := httptest.NewRequest(http.MethodPost, "/api/databases", strings.NewReader(`{"name":"db"}`))
 	response := httptest.NewRecorder()
 	handler.CreateDatabase(response, request)
@@ -178,7 +174,7 @@ func TestCreateDatabaseHandlerDoesNotReturnPassword(t *testing.T) {
 	repository := newMemoryRegistryRepository()
 	protector := testProtector(t)
 	registry := NewRegistryService(repository, NewConnectionManager(repository, protector), protector)
-	handler := NewHandler(registry, nil, testAuthorizer{principal: Principal{UserID: 1, IsPlatformAdmin: true}})
+	handler := NewHandler(registry, nil, testAuthorizer{principal: auth.Principal{UserID: 1, IsPlatformAdmin: true}})
 	request := httptest.NewRequest(http.MethodPost, "/api/databases", strings.NewReader(`{"name":"inventory","host":"db","port":5432,"databaseName":"app","username":"viewer","sslMode":"disable","password":"top-secret"}`))
 	response := httptest.NewRecorder()
 	handler.CreateDatabase(response, request)

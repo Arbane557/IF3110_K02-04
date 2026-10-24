@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+
+	"wbd/backend/auth"
 )
 
 func (app *App) routes() http.Handler {
@@ -17,10 +19,13 @@ func (app *App) routes() http.Handler {
 	mux.HandleFunc("POST /logout", app.Auth.Logout)
 	mux.HandleFunc("GET /whoami", app.Auth.Whoami)
 	mux.Handle("GET /auth", app.Auth.RequireAuthAdmin(http.HandlerFunc(app.Auth.UsersPage)))
+	mux.Handle("GET /groups", app.Auth.RequireAuthAdmin(http.HandlerFunc(app.Auth.GroupsPage)))
+	mux.Handle("GET /groups/{groupID}", app.Auth.RequireAuthAdmin(http.HandlerFunc(app.Auth.GroupPage)))
 	mux.Handle(
 		"POST /api/auth/register",
 		app.Auth.RequireAuthAdmin(http.HandlerFunc(app.Auth.RegisterUser)),
 	)
+	registerGroupRoutes(mux, app.Auth)
 	mux.Handle(
 		"GET /databases",
 		app.Auth.RequireAuth(http.HandlerFunc(app.DatabasePage.DatabasePage)),
@@ -34,6 +39,18 @@ func (app *App) routes() http.Handler {
 	))
 
 	return mux
+}
+
+func registerGroupRoutes(mux *http.ServeMux, handler *auth.Handler) {
+	admin := func(next http.HandlerFunc) http.Handler {
+		return handler.RequireAuthAdmin(next)
+	}
+	mux.Handle("GET /api/auth/groups", admin(handler.ListGroups))
+	mux.Handle("POST /api/auth/groups", admin(handler.CreateGroup))
+	mux.Handle("GET /api/auth/groups/{groupID}", admin(handler.GetGroup))
+	mux.Handle("POST /api/auth/groups/{groupID}/members", admin(handler.AddGroupMember))
+	mux.Handle("DELETE /api/auth/groups/{groupID}/members/{userID}", admin(handler.RemoveGroupMember))
+	mux.Handle("PUT /api/auth/groups/{groupID}/databases/{databaseID}", admin(handler.SetGroupDatabaseAccess))
 }
 
 func (app *App) registerDatabaseRoutes(mux *http.ServeMux) {

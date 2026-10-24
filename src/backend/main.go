@@ -49,8 +49,7 @@ func main() {
 	if err != nil {
 		log.Fatal("parse templates:", err)
 	}
-	keyText := os.Getenv("CREDENTIAL_ENCRYPTION_KEY")
-	key, err := hex.DecodeString(keyText)
+	key, err := hex.DecodeString(os.Getenv("CREDENTIAL_ENCRYPTION_KEY"))
 	if err != nil || len(key) != 32 {
 		log.Fatal("CREDENTIAL_ENCRYPTION_KEY must be 64 hexadecimal characters")
 	}
@@ -60,7 +59,7 @@ func main() {
 	}
 	registryRepository := database.NewPostgresRegistryRepository(internalDB)
 	connectionManager := database.NewConnectionManager(registryRepository, protector)
-	access := database.NewAccessService(internalDB)
+	access := auth.NewAccessService(internalDB)
 	registry := database.NewRegistryService(registryRepository, connectionManager, protector)
 	catalog := database.NewCatalogService(connectionManager)
 	migrationService := migration.NewService(connectionManager)
@@ -72,21 +71,7 @@ func main() {
 		Migration:    migration.NewHandlerWithAPI(migration.NewViewer(templates), migrationService, access),
 	}
 
-	credentialKey := []byte(os.Getenv("DATABASE_CREDENTIAL_KEY"))
-	protector, err := database.NewAESGCMProtector(credentialKey)
-	if err != nil {
-		log.Fatal("configure database credential encryption:", err)
-	}
-	registryRepository := database.NewPostgresRegistryRepository(internalDB)
-	connectionManager := database.NewConnectionManager(registryRepository, protector)
 	defer connectionManager.Close()
-	registry := database.NewRegistryService(registryRepository, connectionManager, protector)
-	catalog := database.NewCatalogService(connectionManager)
-	currentRole := func(r *http.Request) (string, error) {
-		user, err := app.Auth.UserFromRequest(r)
-		return string(user.Role), err
-	}
-	app.DatabaseAPI = database.NewHandler(registry, catalog, currentRole)
 
 	server := &http.Server{
 		Addr:              ":6969",

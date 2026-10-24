@@ -12,8 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TargetPoolProvider is the only connection contract Migration needs. Its
-// caller must perform authorization before requesting a target pool.
+// TargetPoolProvider is the connection contract used by migration services.
 type TargetPoolProvider interface {
 	Pool(ctx context.Context, databaseID DatabaseID) (*pgxpool.Pool, error)
 }
@@ -45,9 +44,7 @@ func (m *ConnectionManager) Pool(ctx context.Context, databaseID DatabaseID) (*p
 		return nil, err
 	}
 	password, err := m.protector.Open(record.PasswordCiphertext)
-	if err != nil {
-		return nil, fmt.Errorf("read target credential: %w", err)
-	}
+	if err != nil { return nil, fmt.Errorf("decrypt target password: %w", err) }
 	record.Config.Password = password
 	pool, err := newPool(ctx, record.Config)
 	if err != nil {

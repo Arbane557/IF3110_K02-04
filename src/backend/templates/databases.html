@@ -10,6 +10,7 @@
     <main class="wide">
         <nav class="topbar">
             <a id="users-link" href="/auth" hidden>Users</a>
+            <a id="groups-link" href="/groups" hidden>Groups</a>
             <a href="/migrations">Migrations</a>
             <form method="post" action="/logout"><button type="submit">Logout</button></form>
         </nav>
@@ -35,11 +36,6 @@
                         <option value="verify-full">verify-full</option>
                     </select>
                 </label>
-                <fieldset class="role-options">
-                    <legend>Roles</legend>
-                    <label><input type="checkbox" name="accessRole" value="ADMIN" checked> Admin</label>
-                    <label><input type="checkbox" name="accessRole" value="USER"> User</label>
-                </fieldset>
                 <div class="form-action"><button type="submit">Save</button></div>
             </form>
             <p id="form-status" class="status" role="status" aria-live="polite"></p>
@@ -50,7 +46,7 @@
             <p id="list-status" class="status" role="status" aria-live="polite">Loading databases…</p>
             <div class="table-wrap">
                 <table>
-                    <thead><tr><th>Name</th><th>ID</th><th>Roles</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Name</th><th>ID</th><th>Access</th><th>Status</th></tr></thead>
                     <tbody id="database-list"></tbody>
                 </table>
             </div>
@@ -85,11 +81,11 @@
                     const row = document.createElement("tr");
                     const name = document.createElement("td");
                     const id = document.createElement("td");
-                    const roles = document.createElement("td");
+                    const access = document.createElement("td");
                     const action = document.createElement("td");
                     name.textContent = database.name;
                     id.textContent = database.id;
-                    roles.textContent = (database.accessRoles || []).join(", ");
+                    access.textContent = currentRole === "ADMIN" ? "Platform admin" : "Group access";
                     if (currentRole === "ADMIN") {
                         const button = document.createElement("button");
                         button.type = "button";
@@ -110,7 +106,7 @@
                     } else {
                         action.textContent = "Available to your role";
                     }
-                    row.append(name, id, roles, action);
+                    row.append(name, id, access, action);
                     databaseList.append(row);
                 }
             } catch (error) {
@@ -123,9 +119,6 @@
             formStatus.textContent = "Saving connection…";
             const values = Object.fromEntries(new FormData(form));
             values.port = Number(values.port);
-            delete values.accessRole;
-            values.accessRoles = [...form.querySelectorAll("input[name='accessRole']:checked")]
-                .map((input) => input.value);
             try {
                 await requestJSON("/api/databases", {
                     method: "POST",
@@ -147,6 +140,7 @@
             document.body.dataset.admin = String(currentRole === "ADMIN");
             document.querySelector("#connection-section").hidden = currentRole !== "ADMIN";
             document.querySelector("#users-link").hidden = currentRole !== "ADMIN";
+            document.querySelector("#groups-link").hidden = currentRole !== "ADMIN";
             return loadDatabases();
         }).catch((error) => {
             listStatus.textContent = error.message;

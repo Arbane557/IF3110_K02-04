@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -162,6 +163,161 @@ func (h *Handler) UsersPage(w http.ResponseWriter, r *http.Request) {
 	if err := h.viewer.RenderUsers(w); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
+}
+
+func (h *Handler) GroupsPage(w http.ResponseWriter, r *http.Request) {
+	if err := h.viewer.RenderGroups(w); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
+}
+
+func (h *Handler) GroupPage(w http.ResponseWriter, r *http.Request) {
+	if err := h.viewer.RenderGroup(w); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
+}
+
+func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
+	groups, err := h.service.ListGroups(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load groups")
+		return
+	}
+	writeJSON(w, http.StatusOK, groups)
+}
+
+func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	group, err := h.service.CreateGroup(r.Context(), request.Name)
+	if errors.Is(err, ErrInvalidGroup) {
+		writeError(w, http.StatusBadRequest, "group name is required and must be at most 100 characters")
+	} else if isUniqueViolation(err) {
+		writeError(w, http.StatusConflict, "group name already exists")
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not create group")
+	} else {
+		writeJSON(w, http.StatusCreated, group)
+	}
+}
+
+func isUniqueViolation(err error) bool {
+	var state interface{ SQLState() string }
+	return errors.As(err, &state) && state.SQLState() == "23505"
+}
+
+func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
+	groupID, ok := positivePathID(w, r, "groupID")
+	if !ok {
+		return
+	}
+	details, err := h.service.GroupDetails(r.Context(), groupID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "group not found")
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load group")
+	} else {
+		writeJSON(w, http.StatusOK, details)
+	}
+}
+
+func (h *Handler) AddGroupMember(w http.ResponseWriter, r *http.Request) {
+	groupID, ok := positivePathID(w, r, "groupID")
+	if !ok {
+		return
+	}
+	var request struct {
+		UserID int64 `json:"userId"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if request.UserID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid user ID")
+		return
+	}
+	if err := h.service.AddGroupMember(r.Context(), groupID, request.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not add group member")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) RemoveGroupMember(w http.ResponseWriter, r *http.Request) {
+	groupID, ok := positivePathID(w, r, "groupID")
+	if !ok {
+		return
+	}
+	userID, ok := positivePathID(w, r, "userID")
+	if !ok {
+		return
+	}
+	if err := h.service.RemoveGroupMember(r.Context(), groupID, userID); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not remove group member")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) SetGroupDatabaseAccess(w http.ResponseWriter, r *http.Request) {
+	groupID, ok := positivePathID(w, r, "groupID")
+	if !ok {
+		return
+	}
+	databaseID, ok := positivePathID(w, r, "databaseID")
+	if !ok {
+		return
+	}
+	var request struct {
+		AccessLevel string `json:"accessLevel"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if request.AccessLevel == "" {
+		if err := h.service.RemoveGroupDatabaseAccess(r.Context(), groupID, databaseID); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not remove database access")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err := h.service.SetGroupDatabaseAccess(r.Context(), groupID, databaseID, request.AccessLevel); errors.Is(err, ErrInvalidGroup) {
+		writeError(w, http.StatusBadRequest, "access level must be view or edit")
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not update database access")
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, value any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return false
+	}
+	return true
+}
+
+func positivePathID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue(name), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid ID")
+		return 0, false
+	}
+	return id, true
 }
 
 func (h *Handler) AuthPage(w http.ResponseWriter, r *http.Request) {

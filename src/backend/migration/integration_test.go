@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"wbd/backend/auth"
 	"wbd/backend/database"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,13 +30,13 @@ type integrationAuthorizer struct {
 	edit bool
 }
 
-func (a integrationAuthorizer) PrincipalFromRequest(*http.Request) (database.Principal, error) {
-	return database.Principal{UserID: 7}, nil
+func (a integrationAuthorizer) PrincipalFromRequest(*http.Request) (auth.Principal, error) {
+	return auth.Principal{UserID: 7}, nil
 }
 
-func (a integrationAuthorizer) AuthorizeDatabase(context.Context, database.Principal, database.DatabaseID, string) error {
+func (a integrationAuthorizer) AuthorizeDatabase(context.Context, auth.Principal, int64, string) error {
 	if !a.edit {
-		return database.ErrForbidden
+		return auth.ErrForbidden
 	}
 	return nil
 }

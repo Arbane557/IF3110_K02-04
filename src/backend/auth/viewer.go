@@ -25,3 +25,11 @@ func (v *Viewer) RenderLogin(w http.ResponseWriter, data LoginPageData) error {
 func (v *Viewer) RenderUsers(w http.ResponseWriter) error {
 	return v.templates.ExecuteTemplate(w, "users.html", nil)
 }
+
+func (v *Viewer) RenderGroups(w http.ResponseWriter) error {
+	return v.templates.ExecuteTemplate(w, "groups.html", nil)
+}
+
+func (v *Viewer) RenderGroup(w http.ResponseWriter) error {
+	return v.templates.ExecuteTemplate(w, "group.html", nil)
+}

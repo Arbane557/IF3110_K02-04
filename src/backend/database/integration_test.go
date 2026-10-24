@@ -72,8 +72,9 @@ func TestRegistryRepositoryAndConnectionManagerIntegration(t *testing.T) {
 
 	config := configFromDSN(t, dsn)
 	config.Name = "integration-target"
-	protector := testProtector(t)
 	repository := NewPostgresRegistryRepository(internalDB)
+	protector, err := NewAESGCMProtector([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil { t.Fatalf("create protector: %v", err) }
 	manager := NewConnectionManager(repository, protector)
 	service := NewRegistryService(repository, manager, protector)
 	created, err := service.Create(context.Background(), config)
@@ -81,7 +82,8 @@ func TestRegistryRepositoryAndConnectionManagerIntegration(t *testing.T) {
 		t.Fatalf("create registry: %v", err)
 	}
 	stored, err := repository.FindByID(context.Background(), created.ID)
-	if err != nil || stored.Config.Name != config.Name || strings.Contains(string(stored.PasswordCiphertext), config.Password) {
+	password, decryptErr := protector.Open(stored.PasswordCiphertext)
+	if err != nil || decryptErr != nil || stored.Config.Name != config.Name || password != config.Password {
 		t.Fatalf("stored registry is invalid: %+v, %v", stored.Config, err)
 	}
 	pool, err := manager.Pool(context.Background(), created.ID)

@@ -1,4 +1,4 @@
-package database
+package auth
 
 import (
 	"context"
@@ -9,15 +9,24 @@ import (
 	"net/http"
 )
 
-const sessionCookieName = "lemonmeloncookie"
+var (
+	ErrUnauthorized = errors.New("unauthorized")
+	ErrForbidden   = errors.New("forbidden")
+)
 
-type AccessService struct {
-	db *sql.DB
+type Principal struct {
+	UserID          int64
+	IsPlatformAdmin bool
 }
 
-func NewAccessService(db *sql.DB) *AccessService {
-	return &AccessService{db: db}
-}
+const (
+	ActionView = "database:view"
+	ActionEdit = "database:edit"
+)
+
+type AccessService struct{ db *sql.DB }
+
+func NewAccessService(db *sql.DB) *AccessService { return &AccessService{db: db} }
 
 func (s *AccessService) PrincipalFromRequest(r *http.Request) (Principal, error) {
 	cookie, err := r.Cookie(sessionCookieName)
@@ -28,12 +37,9 @@ func (s *AccessService) PrincipalFromRequest(r *http.Request) (Principal, error)
 	hash := sha256.Sum256([]byte(cookie.Value))
 	err = s.db.QueryRowContext(r.Context(), `
 		SELECT u.id, u.is_admin
-		FROM sessions s
-		JOIN users u ON u.id = s.user_id
-		WHERE s.token_hash = $1
-		  AND s.revoked_at IS NULL
-		  AND s.idle_expires_at > NOW()
-		  AND s.absolute_expires_at > NOW()
+		FROM sessions s JOIN users u ON u.id = s.user_id
+		WHERE s.token_hash = $1 AND s.revoked_at IS NULL
+		  AND s.idle_expires_at > NOW() AND s.absolute_expires_at > NOW()
 	`, hex.EncodeToString(hash[:])).Scan(&principal.UserID, &principal.IsPlatformAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, ErrUnauthorized
@@ -44,26 +50,23 @@ func (s *AccessService) PrincipalFromRequest(r *http.Request) (Principal, error)
 	return principal, nil
 }
 
-func (s *AccessService) AuthorizeDatabase(ctx context.Context, principal Principal, databaseID DatabaseID, action string) error {
+func (s *AccessService) AuthorizeDatabase(ctx context.Context, principal Principal, databaseID int64, action string) error {
 	if principal.UserID <= 0 {
 		return ErrUnauthorized
 	}
 	if principal.IsPlatformAdmin {
 		return nil
 	}
-
 	requiredLevel := "view"
-	if action == ActionEdit || action == ActionManageRegistry {
+	if action == ActionEdit {
 		requiredLevel = "edit"
 	}
 	var allowed bool
 	err := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1
-			FROM group_members gm
+			SELECT 1 FROM group_members gm
 			JOIN group_database_permissions gp ON gp.group_id = gm.group_id
-			WHERE gm.user_id = $1
-			  AND gp.database_id = $2
+			WHERE gm.user_id = $1 AND gp.database_id = $2
 			  AND ($3 = 'view' OR gp.access_level = 'edit')
 		)
 	`, principal.UserID, databaseID, requiredLevel).Scan(&allowed)

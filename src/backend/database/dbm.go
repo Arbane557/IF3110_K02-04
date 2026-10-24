@@ -1,35 +1,57 @@
 package database
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
+
+	"wbd/backend/auth"
 )
 
 type Handler struct {
 	registry    *RegistryService
 	catalog     *CatalogService
-	currentRole func(*http.Request) (string, error)
+	authorizer  Authorizer
 }
 
-func NewHandler(registry *RegistryService, catalog *CatalogService, currentRole func(*http.Request) (string, error)) *Handler {
-	return &Handler{registry: registry, catalog: catalog, currentRole: currentRole}
+type Authorizer interface {
+	PrincipalFromRequest(*http.Request) (auth.Principal, error)
+	AuthorizeDatabase(context.Context, auth.Principal, int64, string) error
+}
+
+func NewHandler(registry *RegistryService, catalog *CatalogService, authorizer Authorizer) *Handler {
+	return &Handler{registry: registry, catalog: catalog, authorizer: authorizer}
 }
 
 func (h *Handler) ListDatabases(w http.ResponseWriter, r *http.Request) {
-	role, err := h.currentRole(r)
+	principal, err := h.authorizer.PrincipalFromRequest(r)
 	if err != nil {
 		writeServiceError(w, ErrUnauthorized)
 		return
 	}
-	items, err := h.registry.ListByRole(r.Context(), role)
+	items, err := h.registry.List(r.Context())
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	if principal.IsPlatformAdmin {
+		writeJSON(w, http.StatusOK, items)
+		return
+	}
+	visible := make([]DatabaseSummary, 0, len(items))
+	for _, item := range items {
+		err := h.authorizer.AuthorizeDatabase(r.Context(), principal, int64(item.ID), auth.ActionView)
+		if err == nil {
+			visible = append(visible, item)
+		} else if !errors.Is(err, auth.ErrForbidden) {
+			writeServiceError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, visible)
 }
 
 func (h *Handler) CreateDatabase(w http.ResponseWriter, r *http.Request) {
@@ -173,12 +195,12 @@ func (h *Handler) GetRows(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
-	role, err := h.currentRole(r)
+	principal, err := h.authorizer.PrincipalFromRequest(r)
 	if err != nil {
 		writeServiceError(w, ErrUnauthorized)
 		return false
 	}
-	if role != RoleAdmin {
+	if !principal.IsPlatformAdmin {
 		writeServiceError(w, ErrForbidden)
 		return false
 	}
@@ -190,30 +212,16 @@ func (h *Handler) requireView(w http.ResponseWriter, r *http.Request) (DatabaseI
 	if !ok {
 		return 0, false
 	}
-	role, err := h.currentRole(r)
+	principal, err := h.authorizer.PrincipalFromRequest(r)
 	if err != nil {
 		writeServiceError(w, ErrUnauthorized)
 		return 0, false
 	}
-	config, err := h.registry.Get(r.Context(), id)
-	if err != nil {
+	if err := h.authorizer.AuthorizeDatabase(r.Context(), principal, int64(id), auth.ActionView); err != nil {
 		writeServiceError(w, err)
 		return 0, false
 	}
-	if !roleCanAccess(role, config.AccessRoles) {
-		writeServiceError(w, ErrForbidden)
-		return 0, false
-	}
 	return id, true
-}
-
-func roleCanAccess(role string, accessRoles []string) bool {
-	for _, allowedRole := range accessRoles {
-		if allowedRole == role {
-			return true
-		}
-	}
-	return false
 }
 
 func decodeConfig(w http.ResponseWriter, r *http.Request) (DatabaseConfig, bool) {
@@ -234,7 +242,7 @@ func decodeConfig(w http.ResponseWriter, r *http.Request) (DatabaseConfig, bool)
 	return DatabaseConfig{
 		Name: request.Name, Host: request.Host, Port: request.Port,
 		DatabaseName: request.DatabaseName, Username: request.Username,
-		SSLMode: request.SSLMode, AccessRoles: request.AccessRoles, Password: request.Password,
+		SSLMode: request.SSLMode, Password: request.Password,
 	}, true
 }
 
@@ -276,15 +284,14 @@ type databaseConfigRequest struct {
 	DatabaseName string `json:"databaseName"`
 	Username     string   `json:"username"`
 	SSLMode      string   `json:"sslMode"`
-	AccessRoles  []string `json:"accessRoles"`
 	Password     string   `json:"password"`
 }
 
 func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrUnauthorized):
+	case errors.Is(err, ErrUnauthorized), errors.Is(err, auth.ErrUnauthorized):
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
-	case errors.Is(err, ErrForbidden):
+	case errors.Is(err, ErrForbidden), errors.Is(err, auth.ErrForbidden):
 		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
 	case errors.Is(err, ErrNotFound):
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not found"})

@@ -4,9 +4,8 @@ services:
     ports:
       - "6969:6969"
     environment:
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?set a 64-character hexadecimal key}
+      CREDENTIAL_ENCRYPTION_KEY: "93ad4404cc00969ffe09ea9ef41653921074a743803b7b9f519f783020367921"
       DATABASE_URL: postgres://app:secret@database:5432/app?sslmode=disable
-      DATABASE_CREDENTIAL_KEY: "0123456789abcdef0123456789abcdef"
     depends_on:
       database:
         condition: service_healthy

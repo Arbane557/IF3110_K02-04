@@ -2,11 +2,6 @@ package migration
 
 import "time"
 
-const (
-	ActionView = "database:view"
-	ActionEdit = "database:edit"
-)
-
 type Migration struct {
 	Version      int64      `json:"version"`
 	SQL          string     `json:"sql"`

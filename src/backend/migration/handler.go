@@ -7,12 +7,13 @@ import (
 	"net/http"
 	"strconv"
 
+	"wbd/backend/auth"
 	"wbd/backend/database"
 )
 
 type Authorizer interface {
-	PrincipalFromRequest(r *http.Request) (database.Principal, error)
-	AuthorizeDatabase(ctx context.Context, principal database.Principal, databaseID database.DatabaseID, action string) error
+	PrincipalFromRequest(r *http.Request) (auth.Principal, error)
+	AuthorizeDatabase(ctx context.Context, principal auth.Principal, databaseID int64, action string) error
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
@@ -24,7 +25,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := h.authorize(w, r, ActionView)
+	id, _, ok := h.authorize(w, r, auth.ActionView)
 	if !ok {
 		return
 	}
@@ -37,7 +38,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := h.authorize(w, r, ActionView)
+	id, _, ok := h.authorize(w, r, auth.ActionView)
 	if !ok {
 		return
 	}
@@ -54,7 +55,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
-	id, principal, ok := h.authorize(w, r, ActionEdit)
+	id, principal, ok := h.authorize(w, r, auth.ActionEdit)
 	if !ok {
 		return
 	}
@@ -71,7 +72,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := h.authorize(w, r, ActionEdit)
+	id, _, ok := h.authorize(w, r, auth.ActionEdit)
 	if !ok {
 		return
 	}
@@ -92,7 +93,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) execute(w http.ResponseWriter, r *http.Request) {
-	id, principal, ok := h.authorize(w, r, ActionEdit)
+	id, principal, ok := h.authorize(w, r, auth.ActionEdit)
 	if !ok {
 		return
 	}
@@ -108,26 +109,26 @@ func (h *Handler) execute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
-func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, action string) (database.DatabaseID, database.Principal, bool) {
+func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, action string) (database.DatabaseID, auth.Principal, bool) {
 	value, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
 	if err != nil || value <= 0 {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid database ID"})
-		return 0, database.Principal{}, false
+		return 0, auth.Principal{}, false
 	}
 	principal, err := h.authorizer.PrincipalFromRequest(r)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
-		return 0, database.Principal{}, false
+		return 0, auth.Principal{}, false
 	}
-	if err := h.authorizer.AuthorizeDatabase(r.Context(), principal, database.DatabaseID(value), action); err != nil {
+	if err := h.authorizer.AuthorizeDatabase(r.Context(), principal, value, action); err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, database.ErrUnauthorized) {
+		if errors.Is(err, auth.ErrUnauthorized) {
 			status = http.StatusUnauthorized
-		} else if errors.Is(err, database.ErrForbidden) {
+		} else if errors.Is(err, auth.ErrForbidden) {
 			status = http.StatusForbidden
 		}
 		writeJSON(w, status, errorResponse{Error: http.StatusText(status)})
-		return 0, database.Principal{}, false
+		return 0, auth.Principal{}, false
 	}
 	return database.DatabaseID(value), principal, true
 }
