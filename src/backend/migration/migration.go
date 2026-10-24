@@ -15,8 +15,8 @@ func NewHandler(viewer *Viewer) *Handler {
 	return &Handler{viewer: viewer}
 }
 
-func NewAPIHandler(service *Service, authorizer Authorizer) *Handler {
-	return &Handler{service: service, authorizer: authorizer}
+func NewHandlerWithAPI(viewer *Viewer, service *Service, authorizer Authorizer) *Handler {
+	return &Handler{viewer: viewer, service: service, authorizer: authorizer}
 }
 
 func (h *Handler) MigrationPage(w http.ResponseWriter, r *http.Request) {

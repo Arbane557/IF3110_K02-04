@@ -2,6 +2,7 @@ package migration
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"time"
@@ -215,7 +216,11 @@ type rowScanner interface {
 
 func scanMigration(row rowScanner, optional ...*Migration) (Migration, error) {
 	var item Migration
-	err := row.Scan(&item.Version, &item.SQL, &item.CreatedBy, &item.ExecutedBy, &item.CreatedAt, &item.ExecutedAt, &item.Status, &item.ErrorMessage)
+	var errorMessage sql.NullString
+	err := row.Scan(&item.Version, &item.SQL, &item.CreatedBy, &item.ExecutedBy, &item.CreatedAt, &item.ExecutedAt, &item.Status, &errorMessage)
+	if err == nil && errorMessage.Valid {
+		item.ErrorMessage = errorMessage.String
+	}
 	if len(optional) > 0 {
 		*optional[0] = item
 	}
