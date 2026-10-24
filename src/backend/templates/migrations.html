@@ -7,27 +7,63 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <main>
-        <nav><a href="/databases">Databases</a></nav>
+    <main class="wide">
+        <nav class="topbar">
+            <a href="/databases">Databases</a>
+            <form method="post" action="/logout"><button type="submit">Logout</button></form>
+        </nav>
+
         <h1>Migrations</h1>
-        <p>Select an authorized database to view migration history.</p>
-        <p>This page is a template. Migration data and actions are not connected yet.</p>
-        <section aria-labelledby="history-heading">
-            <h2 id="history-heading">Migration history</h2>
-            <table>
-                <caption>No database selected</caption>
-                <thead><tr><th scope="col">Version</th><th scope="col">Executed by</th><th scope="col">Time</th><th scope="col">Status</th></tr></thead>
-                <tbody><tr><td colspan="4">No migration history loaded.</td></tr></tbody>
-            </table>
+        <section>
+            <label for="database-select">Database</label>
+            <select id="database-select" disabled>
+                <option>Loading databases...</option>
+            </select>
+            <p id="migration-status" class="status" role="status" aria-live="polite"></p>
         </section>
-        <section aria-labelledby="sql-heading">
-            <h2 id="sql-heading">Migration SQL</h2>
-            <label for="migration-sql">SQL preview</label>
-            <textarea id="migration-sql" rows="10" cols="40" readonly placeholder="Select a migration to review its SQL."></textarea>
-            <p>Creating, editing, and executing migrations requires View + Edit access through a group.</p>
-            <button type="button" disabled>Save draft</button>
-            <button type="button" disabled>Execute migration</button>
+
+        <section>
+            <h2>History</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Version</th><th>Name</th><th>Applied</th><th>Status</th></tr></thead>
+                    <tbody id="migration-list">
+                        <tr><td colspan="4">Migration history is not connected yet.</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </section>
     </main>
+    <script>
+        const databaseSelect = document.querySelector("#database-select");
+        const migrationStatus = document.querySelector("#migration-status");
+
+        async function loadDatabases() {
+            try {
+                const response = await fetch("/api/databases");
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
+
+                databaseSelect.replaceChildren();
+                if (result.length === 0) {
+                    databaseSelect.add(new Option("No databases available", ""));
+                    migrationStatus.textContent = "No database is available to your role.";
+                    return;
+                }
+
+                databaseSelect.add(new Option("Select a database", ""));
+                for (const database of result) {
+                    databaseSelect.add(new Option(database.name, database.id));
+                }
+                databaseSelect.disabled = false;
+                migrationStatus.textContent = "Migration history is not connected yet.";
+            } catch (error) {
+                databaseSelect.replaceChildren(new Option("Could not load databases", ""));
+                migrationStatus.textContent = error.message;
+            }
+        }
+
+        loadDatabases();
+    </script>
 </body>
 </html>

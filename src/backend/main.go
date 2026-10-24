@@ -71,7 +71,23 @@ func main() {
 		DatabaseAPI:  database.NewHandler(registry, catalog, access),
 		Migration:    migration.NewHandlerWithAPI(migration.NewViewer(templates), migrationService, access),
 	}
+
+	credentialKey := []byte(os.Getenv("DATABASE_CREDENTIAL_KEY"))
+	protector, err := database.NewAESGCMProtector(credentialKey)
+	if err != nil {
+		log.Fatal("configure database credential encryption:", err)
+	}
+	registryRepository := database.NewPostgresRegistryRepository(internalDB)
+	connectionManager := database.NewConnectionManager(registryRepository, protector)
 	defer connectionManager.Close()
+	registry := database.NewRegistryService(registryRepository, connectionManager, protector)
+	catalog := database.NewCatalogService(connectionManager)
+	currentRole := func(r *http.Request) (string, error) {
+		user, err := app.Auth.UserFromRequest(r)
+		return string(user.Role), err
+	}
+	app.DatabaseAPI = database.NewHandler(registry, catalog, currentRole)
+
 	server := &http.Server{
 		Addr:              ":6969",
 		Handler:           app.routes(),

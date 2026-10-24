@@ -1,7 +1,6 @@
 package database
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,37 +8,23 @@ import (
 	"strconv"
 )
 
-const (
-	ActionManageRegistry = "database:manage"
-	ActionView           = "database:view"
-	ActionEdit           = "database:edit"
-)
-
-type Principal struct {
-	UserID          int64
-	IsPlatformAdmin bool
-}
-
-type Authorizer interface {
-	PrincipalFromRequest(r *http.Request) (Principal, error)
-	AuthorizeDatabase(ctx context.Context, principal Principal, databaseID DatabaseID, action string) error
-}
-
 type Handler struct {
-	registry   *RegistryService
-	catalog    *CatalogService
-	authorizer Authorizer
+	registry    *RegistryService
+	catalog     *CatalogService
+	currentRole func(*http.Request) (string, error)
 }
 
-func NewHandler(registry *RegistryService, catalog *CatalogService, authorizer Authorizer) *Handler {
-	return &Handler{registry: registry, catalog: catalog, authorizer: authorizer}
+func NewHandler(registry *RegistryService, catalog *CatalogService, currentRole func(*http.Request) (string, error)) *Handler {
+	return &Handler{registry: registry, catalog: catalog, currentRole: currentRole}
 }
 
 func (h *Handler) ListDatabases(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAdmin(w, r) {
+	role, err := h.currentRole(r)
+	if err != nil {
+		writeServiceError(w, ErrUnauthorized)
 		return
 	}
-	items, err := h.registry.List(r.Context())
+	items, err := h.registry.ListByRole(r.Context(), role)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -188,12 +173,12 @@ func (h *Handler) GetRows(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
-	principal, err := h.authorizer.PrincipalFromRequest(r)
+	role, err := h.currentRole(r)
 	if err != nil {
 		writeServiceError(w, ErrUnauthorized)
 		return false
 	}
-	if !principal.IsPlatformAdmin {
+	if role != RoleAdmin {
 		writeServiceError(w, ErrForbidden)
 		return false
 	}
@@ -205,16 +190,30 @@ func (h *Handler) requireView(w http.ResponseWriter, r *http.Request) (DatabaseI
 	if !ok {
 		return 0, false
 	}
-	principal, err := h.authorizer.PrincipalFromRequest(r)
+	role, err := h.currentRole(r)
 	if err != nil {
 		writeServiceError(w, ErrUnauthorized)
 		return 0, false
 	}
-	if err := h.authorizer.AuthorizeDatabase(r.Context(), principal, id, ActionView); err != nil {
+	config, err := h.registry.Get(r.Context(), id)
+	if err != nil {
 		writeServiceError(w, err)
 		return 0, false
 	}
+	if !roleCanAccess(role, config.AccessRoles) {
+		writeServiceError(w, ErrForbidden)
+		return 0, false
+	}
 	return id, true
+}
+
+func roleCanAccess(role string, accessRoles []string) bool {
+	for _, allowedRole := range accessRoles {
+		if allowedRole == role {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeConfig(w http.ResponseWriter, r *http.Request) (DatabaseConfig, bool) {
@@ -235,7 +234,7 @@ func decodeConfig(w http.ResponseWriter, r *http.Request) (DatabaseConfig, bool)
 	return DatabaseConfig{
 		Name: request.Name, Host: request.Host, Port: request.Port,
 		DatabaseName: request.DatabaseName, Username: request.Username,
-		SSLMode: request.SSLMode, Password: request.Password,
+		SSLMode: request.SSLMode, AccessRoles: request.AccessRoles, Password: request.Password,
 	}, true
 }
 
@@ -275,9 +274,10 @@ type databaseConfigRequest struct {
 	Host         string `json:"host"`
 	Port         uint16 `json:"port"`
 	DatabaseName string `json:"databaseName"`
-	Username     string `json:"username"`
-	SSLMode      string `json:"sslMode"`
-	Password     string `json:"password"`
+	Username     string   `json:"username"`
+	SSLMode      string   `json:"sslMode"`
+	AccessRoles  []string `json:"accessRoles"`
+	Password     string   `json:"password"`
 }
 
 func writeServiceError(w http.ResponseWriter, err error) {

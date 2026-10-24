@@ -7,14 +7,150 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <main>
-        <h1>Databases</h1>
-        <p>You are logged in.</p>
-        <p><a href="/migrations">Migration page template</a></p>
+    <main class="wide">
+        <nav class="topbar">
+            <a id="users-link" href="/auth" hidden>Users</a>
+            <a href="/migrations">Migrations</a>
+            <form method="post" action="/logout"><button type="submit">Logout</button></form>
+        </nav>
 
-        <form method="post" action="/logout">
-            <button type="submit">Logout</button>
-        </form>
+        <h1>Databases</h1>
+
+        <section id="connection-section" hidden>
+            <h2>Add database</h2>
+            <form id="database-form" class="form-grid">
+                <label>Name<input name="name" required maxlength="100" placeholder="Development"></label>
+                <label>Host<input name="host" required></label>
+                <label>Port<input name="port" type="number" min="1" max="65535" value="5432" required></label>
+                <label>Database<input name="databaseName" required></label>
+                <label>User<input name="username" required autocomplete="username"></label>
+                <label>Password<input name="password" type="password" required autocomplete="new-password"></label>
+                <label>SSL mode
+                    <select name="sslMode" required>
+                        <option value="disable">disable</option>
+                        <option value="allow">allow</option>
+                        <option value="prefer">prefer</option>
+                        <option value="require" selected>require</option>
+                        <option value="verify-ca">verify-ca</option>
+                        <option value="verify-full">verify-full</option>
+                    </select>
+                </label>
+                <fieldset class="role-options">
+                    <legend>Roles</legend>
+                    <label><input type="checkbox" name="accessRole" value="ADMIN" checked> Admin</label>
+                    <label><input type="checkbox" name="accessRole" value="USER"> User</label>
+                </fieldset>
+                <div class="form-action"><button type="submit">Save</button></div>
+            </form>
+            <p id="form-status" class="status" role="status" aria-live="polite"></p>
+        </section>
+
+        <section>
+            <h2>Saved databases</h2>
+            <p id="list-status" class="status" role="status" aria-live="polite">Loading databases…</p>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Name</th><th>ID</th><th>Roles</th><th>Status</th></tr></thead>
+                    <tbody id="database-list"></tbody>
+                </table>
+            </div>
+        </section>
     </main>
+    <script>
+        const form = document.querySelector("#database-form");
+        const formStatus = document.querySelector("#form-status");
+        const listStatus = document.querySelector("#list-status");
+        const databaseList = document.querySelector("#database-list");
+        let currentRole = "USER";
+
+        async function requestJSON(url, options) {
+            const response = await fetch(url, options);
+            const payload = response.status === 204 ? null : await response.json();
+            if (!response.ok) throw new Error(payload?.error || `Request failed (${response.status})`);
+            return payload;
+        }
+
+        async function loadDatabases() {
+            try {
+                const databases = await requestJSON("/api/databases");
+                databaseList.replaceChildren();
+                if (databases.length === 0) {
+                    listStatus.textContent = document.body.dataset.admin === "true"
+                        ? "No databases saved yet. Add a connection above."
+                        : "No databases are assigned to your account yet.";
+                    return;
+                }
+                listStatus.textContent = "";
+                for (const database of databases) {
+                    const row = document.createElement("tr");
+                    const name = document.createElement("td");
+                    const id = document.createElement("td");
+                    const roles = document.createElement("td");
+                    const action = document.createElement("td");
+                    name.textContent = database.name;
+                    id.textContent = database.id;
+                    roles.textContent = (database.accessRoles || []).join(", ");
+                    if (currentRole === "ADMIN") {
+                        const button = document.createElement("button");
+                        button.type = "button";
+                        button.textContent = "Connect";
+                        button.addEventListener("click", async () => {
+                            button.disabled = true;
+                            button.textContent = "Connecting…";
+                            try {
+                                await requestJSON(`/api/databases/${database.id}/test-connection`, { method: "POST" });
+                                button.textContent = "Connected";
+                            } catch (error) {
+                                button.textContent = "Retry";
+                                listStatus.textContent = error.message;
+                                button.disabled = false;
+                            }
+                        });
+                        action.append(button);
+                    } else {
+                        action.textContent = "Available to your role";
+                    }
+                    row.append(name, id, roles, action);
+                    databaseList.append(row);
+                }
+            } catch (error) {
+                listStatus.textContent = error.message;
+            }
+        }
+
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            formStatus.textContent = "Saving connection…";
+            const values = Object.fromEntries(new FormData(form));
+            values.port = Number(values.port);
+            delete values.accessRole;
+            values.accessRoles = [...form.querySelectorAll("input[name='accessRole']:checked")]
+                .map((input) => input.value);
+            try {
+                await requestJSON("/api/databases", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(values),
+                });
+                form.reset();
+                form.elements.port.value = 5432;
+                form.elements.sslMode.value = "require";
+                formStatus.textContent = "Saved. Select Connect to test it.";
+                await loadDatabases();
+            } catch (error) {
+                formStatus.textContent = error.message;
+            }
+        });
+
+        requestJSON("/whoami").then((user) => {
+            currentRole = user.role;
+            document.body.dataset.admin = String(currentRole === "ADMIN");
+            document.querySelector("#connection-section").hidden = currentRole !== "ADMIN";
+            document.querySelector("#users-link").hidden = currentRole !== "ADMIN";
+            return loadDatabases();
+        }).catch((error) => {
+            listStatus.textContent = error.message;
+        });
+    </script>
 </body>
 </html>

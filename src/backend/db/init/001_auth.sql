@@ -15,3 +15,4 @@ CREATE TABLE sessions (
     last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     revoked_at TIMESTAMPTZ
 );
+

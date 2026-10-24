@@ -21,3 +21,7 @@ func NewViewer(templates *template.Template) *Viewer {
 func (v *Viewer) RenderLogin(w http.ResponseWriter, data LoginPageData) error {
 	return v.templates.ExecuteTemplate(w, "login.html", data)
 }
+
+func (v *Viewer) RenderUsers(w http.ResponseWriter) error {
+	return v.templates.ExecuteTemplate(w, "users.html", nil)
+}
