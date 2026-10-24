@@ -14,8 +14,6 @@ const (
 	ActionView           = "database:view"
 )
 
-// Principal and Authorizer are implemented by an adapter in the Auth module.
-// Keeping this contract here prevents a dependency from database to Auth.
 type Principal struct {
 	UserID          int64
 	IsPlatformAdmin bool
@@ -28,30 +26,15 @@ type Authorizer interface {
 
 type Handler struct {
 	registry   *RegistryService
-	viewer     *ViewerService
+	catalog    *CatalogService
 	authorizer Authorizer
 }
 
-func NewHandler(registry *RegistryService, viewer *ViewerService, authorizer Authorizer) *Handler {
-	return &Handler{registry: registry, viewer: viewer, authorizer: authorizer}
+func NewHandler(registry *RegistryService, catalog *CatalogService, authorizer Authorizer) *Handler {
+	return &Handler{registry: registry, catalog: catalog, authorizer: authorizer}
 }
 
-// RegisterRoutes registers JSON API routes. The application's HTML routes can
-// use the same services separately, without duplicating authorization logic.
-func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/databases", h.listDatabases)
-	mux.HandleFunc("POST /api/databases", h.createDatabase)
-	mux.HandleFunc("GET /api/databases/{databaseID}", h.getDatabase)
-	mux.HandleFunc("PUT /api/databases/{databaseID}", h.updateDatabase)
-	mux.HandleFunc("DELETE /api/databases/{databaseID}", h.deleteDatabase)
-	mux.HandleFunc("POST /api/databases/{databaseID}/test-connection", h.testConnection)
-	mux.HandleFunc("GET /api/databases/{databaseID}/schemas", h.listSchemas)
-	mux.HandleFunc("GET /api/databases/{databaseID}/schemas/{schema}/tables", h.listTables)
-	mux.HandleFunc("GET /api/databases/{databaseID}/schemas/{schema}/tables/{table}", h.getTableDetails)
-	mux.HandleFunc("GET /api/databases/{databaseID}/schemas/{schema}/tables/{table}/rows", h.getRows)
-}
-
-func (h *Handler) listDatabases(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) ListDatabases(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
@@ -63,7 +46,7 @@ func (h *Handler) listDatabases(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
-func (h *Handler) createDatabase(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) CreateDatabase(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
@@ -79,7 +62,7 @@ func (h *Handler) createDatabase(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
-func (h *Handler) getDatabase(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GetDatabase(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
@@ -95,7 +78,7 @@ func (h *Handler) getDatabase(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, config)
 }
 
-func (h *Handler) updateDatabase(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) UpdateDatabase(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
@@ -116,7 +99,7 @@ func (h *Handler) updateDatabase(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func (h *Handler) deleteDatabase(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) DeleteDatabase(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
@@ -131,7 +114,7 @@ func (h *Handler) deleteDatabase(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *Handler) testConnection(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) TestConnection(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
 	}
@@ -146,12 +129,12 @@ func (h *Handler) testConnection(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *Handler) listSchemas(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) ListSchemas(w http.ResponseWriter, r *http.Request) {
 	id, ok := h.requireView(w, r)
 	if !ok {
 		return
 	}
-	result, err := h.viewer.ListSchemas(r.Context(), id)
+	result, err := h.catalog.ListSchemas(r.Context(), id)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -159,12 +142,12 @@ func (h *Handler) listSchemas(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (h *Handler) listTables(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) ListTables(w http.ResponseWriter, r *http.Request) {
 	id, ok := h.requireView(w, r)
 	if !ok {
 		return
 	}
-	result, err := h.viewer.ListTables(r.Context(), id, r.PathValue("schema"))
+	result, err := h.catalog.ListTables(r.Context(), id, r.PathValue("schema"))
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -172,12 +155,12 @@ func (h *Handler) listTables(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (h *Handler) getTableDetails(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GetTableDetails(w http.ResponseWriter, r *http.Request) {
 	id, ok := h.requireView(w, r)
 	if !ok {
 		return
 	}
-	result, err := h.viewer.GetTableDetails(r.Context(), id, r.PathValue("schema"), r.PathValue("table"))
+	result, err := h.catalog.GetTableDetails(r.Context(), id, r.PathValue("schema"), r.PathValue("table"))
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -185,7 +168,7 @@ func (h *Handler) getTableDetails(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (h *Handler) getRows(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GetRows(w http.ResponseWriter, r *http.Request) {
 	id, ok := h.requireView(w, r)
 	if !ok {
 		return
@@ -195,7 +178,7 @@ func (h *Handler) getRows(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid pagination"})
 		return
 	}
-	result, err := h.viewer.GetRows(r.Context(), id, r.PathValue("schema"), r.PathValue("table"), page)
+	result, err := h.catalog.GetRows(r.Context(), id, r.PathValue("schema"), r.PathValue("table"), page)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -238,6 +221,7 @@ func decodeConfig(w http.ResponseWriter, r *http.Request) (DatabaseConfig, bool)
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
+
 	var request databaseConfigRequest
 	if err := decoder.Decode(&request); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON body"})
@@ -311,6 +295,7 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
 	}
 }
+
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")

@@ -10,11 +10,16 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"wbd/backend/auth"
+	"wbd/backend/database"
+	"wbd/backend/migration"
 )
 
 type App struct {
-	InternalDB *sql.DB
-	Templates  *template.Template
+	Auth         *auth.Handler
+	DatabaseAPI  *database.Handler
+	DatabasePage *database.Viewer
+	Migration     *migration.Handler
 }
 
 func main() {
@@ -45,8 +50,9 @@ func main() {
 	}
 
 	app := &App{
-		InternalDB: internalDB,
-		Templates:  templates,
+		Auth:          auth.NewHandler(auth.NewService(internalDB), auth.NewViewer(templates)),
+		DatabasePage:  database.NewViewer(templates),
+		Migration:     migration.NewHandler(migration.NewViewer(templates)),
 	}
 	server := &http.Server{
 		Addr:              ":6969",

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Migrations</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <main>
+        <nav><a href="/databases">Databases</a></nav>
+        <h1>Migrations</h1>
+        <p>Select an authorized database to view migration history.</p>
+        <p>This page is a template. Migration data and actions are not connected yet.</p>
+        <section aria-labelledby="history-heading">
+            <h2 id="history-heading">Migration history</h2>
+            <table>
+                <caption>No database selected</caption>
+                <thead><tr><th scope="col">Version</th><th scope="col">Executed by</th><th scope="col">Time</th><th scope="col">Status</th></tr></thead>
+                <tbody><tr><td colspan="4">No migration history loaded.</td></tr></tbody>
+            </table>
+        </section>
+        <section aria-labelledby="sql-heading">
+            <h2 id="sql-heading">Migration SQL</h2>
+            <label for="migration-sql">SQL preview</label>
+            <textarea id="migration-sql" rows="10" cols="40" readonly placeholder="Select a migration to review its SQL."></textarea>
+            <p>Creating, editing, and executing migrations requires View + Edit access through a group.</p>
+            <button type="button" disabled>Save draft</button>
+            <button type="button" disabled>Execute migration</button>
+        </section>
+    </main>
+</body>
+</html>

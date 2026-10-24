@@ -1,7 +1,7 @@
 // Package database contains the PostgreSQL target-database registry,
 // connection manager, and read-only viewer. It deliberately does not import
 // the application's auth or migration packages; those integrations happen
-// through the interfaces declared here and in handler.go.
+// through the interfaces declared here and in the application routes.go.
 package database
 
 import (
