@@ -117,9 +117,9 @@ func TestMigrationAccessLevels(t *testing.T) {
 	service := NewService(integrationPool{pool: pool})
 	sqlText := fmt.Sprintf("CREATE TABLE migration_access_%d (id INTEGER)", time.Now().UnixNano())
 
-	viewOnly := NewHandlerWithAPI(nil, service, integrationAuthorizer{edit: false})
+	viewOnly := NewHandler(nil, service, integrationAuthorizer{edit: false})
 	mux := http.NewServeMux()
-	viewOnly.RegisterRoutes(mux)
+	mux.HandleFunc("POST /api/databases/{databaseID}/migrations", viewOnly.CreateMigration)
 	request := httptest.NewRequest(http.MethodPost, "/api/databases/1/migrations", strings.NewReader(fmt.Sprintf(`{"sql":%q}`, sqlText)))
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
@@ -127,9 +127,9 @@ func TestMigrationAccessLevels(t *testing.T) {
 		t.Fatalf("View Only create status = %d, want %d", response.Code, http.StatusForbidden)
 	}
 
-	viewEdit := NewHandlerWithAPI(nil, service, integrationAuthorizer{edit: true})
+	viewEdit := NewHandler(nil, service, integrationAuthorizer{edit: true})
 	mux = http.NewServeMux()
-	viewEdit.RegisterRoutes(mux)
+	mux.HandleFunc("POST /api/databases/{databaseID}/migrations", viewEdit.CreateMigration)
 	request = httptest.NewRequest(http.MethodPost, "/api/databases/1/migrations", strings.NewReader(fmt.Sprintf(`{"sql":%q}`, sqlText)))
 	response = httptest.NewRecorder()
 	mux.ServeHTTP(response, request)

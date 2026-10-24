@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"html/template"
 	"io"
 	"net/http"
 	"strconv"
@@ -15,12 +16,12 @@ import (
 const sessionCookieName = "lemonmeloncookie"
 
 type Handler struct {
-	service *Service
-	viewer  *Viewer
+	service   *Service
+	templates *template.Template
 }
 
-func NewHandler(service *Service, viewer *Viewer) *Handler {
-	return &Handler{service: service, viewer: viewer}
+func NewHandler(service *Service, templates *template.Template) *Handler {
+	return &Handler{service: service, templates: templates}
 }
 
 func (h *Handler) RequireAuth(next http.Handler) http.Handler {
@@ -160,21 +161,15 @@ func (h *Handler) RegisterUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) UsersPage(w http.ResponseWriter, r *http.Request) {
-	if err := h.viewer.RenderUsers(w); err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-	}
+	h.renderTemplate(w, "users.html", nil)
 }
 
 func (h *Handler) GroupsPage(w http.ResponseWriter, r *http.Request) {
-	if err := h.viewer.RenderGroups(w); err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-	}
+	h.renderTemplate(w, "groups.html", nil)
 }
 
 func (h *Handler) GroupPage(w http.ResponseWriter, r *http.Request) {
-	if err := h.viewer.RenderGroup(w); err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-	}
+	h.renderTemplate(w, "group.html", nil)
 }
 
 func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +321,13 @@ func (h *Handler) AuthPage(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) renderLogin(w http.ResponseWriter, status int, message string) {
 	w.WriteHeader(status)
-	if err := h.viewer.RenderLogin(w, LoginPageData{Error: message}); err != nil {
+	if err := h.templates.ExecuteTemplate(w, "login.html", struct{ Error string }{message}); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
+}
+
+func (h *Handler) renderTemplate(w http.ResponseWriter, name string, data any) {
+	if err := h.templates.ExecuteTemplate(w, name, data); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }

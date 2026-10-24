@@ -16,15 +16,7 @@ type Authorizer interface {
 	AuthorizeDatabase(ctx context.Context, principal auth.Principal, databaseID int64, action string) error
 }
 
-func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/databases/{databaseID}/migrations", h.list)
-	mux.HandleFunc("POST /api/databases/{databaseID}/migrations", h.create)
-	mux.HandleFunc("GET /api/databases/{databaseID}/migrations/{version}", h.get)
-	mux.HandleFunc("PUT /api/databases/{databaseID}/migrations/{version}", h.update)
-	mux.HandleFunc("POST /api/databases/{databaseID}/migrations/{version}/execute", h.execute)
-}
-
-func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) ListMigrations(w http.ResponseWriter, r *http.Request) {
 	id, _, ok := h.authorize(w, r, auth.ActionView)
 	if !ok {
 		return
@@ -37,7 +29,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
-func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GetMigration(w http.ResponseWriter, r *http.Request) {
 	id, _, ok := h.authorize(w, r, auth.ActionView)
 	if !ok {
 		return
@@ -54,7 +46,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
-func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) CreateMigration(w http.ResponseWriter, r *http.Request) {
 	id, principal, ok := h.authorize(w, r, auth.ActionEdit)
 	if !ok {
 		return
@@ -71,7 +63,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, item)
 }
 
-func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) UpdateMigration(w http.ResponseWriter, r *http.Request) {
 	id, _, ok := h.authorize(w, r, auth.ActionEdit)
 	if !ok {
 		return
@@ -92,7 +84,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
-func (h *Handler) execute(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) ExecuteMigration(w http.ResponseWriter, r *http.Request) {
 	id, principal, ok := h.authorize(w, r, auth.ActionEdit)
 	if !ok {
 		return

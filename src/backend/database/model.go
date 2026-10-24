@@ -27,6 +27,7 @@ type DatabaseConfig struct {
 type DatabaseSummary struct {
 	ID          DatabaseID `json:"id"`
 	Name        string     `json:"name"`
+	AccessLevel string     `json:"accessLevel"`
 }
 
 type Schema struct {

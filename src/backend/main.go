@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"html/template"
 	"log"
 	"net/http"
@@ -17,10 +18,9 @@ import (
 )
 
 type App struct {
-	Auth         *auth.Handler
-	DatabaseAPI  *database.Handler
-	DatabasePage *database.Viewer
-	Migration    *migration.Handler
+	Auth      *auth.Handler
+	Database  *database.Handler
+	Migration *migration.Handler
 }
 
 func main() {
@@ -65,10 +65,9 @@ func main() {
 	migrationService := migration.NewService(connectionManager)
 
 	app := &App{
-		Auth:         auth.NewHandler(auth.NewService(internalDB), auth.NewViewer(templates)),
-		DatabasePage: database.NewViewer(templates),
-		DatabaseAPI:  database.NewHandler(registry, catalog, access),
-		Migration:    migration.NewHandlerWithAPI(migration.NewViewer(templates), migrationService, access),
+		Auth:      auth.NewHandler(auth.NewService(internalDB), templates),
+		Database:  database.NewHandler(registry, catalog, access, templates),
+		Migration: migration.NewHandler(templates, migrationService, access),
 	}
 
 	defer connectionManager.Close()
@@ -84,4 +83,10 @@ func main() {
 
 	log.Println("server running on http://localhost:6969")
 	log.Fatal(server.ListenAndServe())
+}
+
+func (app *App) healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }

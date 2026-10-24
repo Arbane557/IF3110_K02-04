@@ -1,24 +1,23 @@
 package migration
 
 import (
+	"html/template"
 	"net/http"
 )
 
-// Handler connects migration routes to the migration page viewer.
+// Handler serves migration pages and migration API requests.
 type Handler struct {
-	viewer     *Viewer
+	templates  *template.Template
 	service    *Service
 	authorizer Authorizer
 }
 
-func NewHandler(viewer *Viewer) *Handler {
-	return &Handler{viewer: viewer}
-}
-
-func NewHandlerWithAPI(viewer *Viewer, service *Service, authorizer Authorizer) *Handler {
-	return &Handler{viewer: viewer, service: service, authorizer: authorizer}
+func NewHandler(templates *template.Template, service *Service, authorizer Authorizer) *Handler {
+	return &Handler{templates: templates, service: service, authorizer: authorizer}
 }
 
 func (h *Handler) MigrationPage(w http.ResponseWriter, r *http.Request) {
-	h.viewer.MigrationPage(w, r)
+	if err := h.templates.ExecuteTemplate(w, "migrations.html", nil); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
 }

@@ -161,7 +161,7 @@ func TestTargetDSNPreservesEscapedCredentials(t *testing.T) {
 }
 
 func TestCreateDatabaseHandlerRejectsNonAdmin(t *testing.T) {
-	handler := NewHandler(nil, nil, testAuthorizer{principal: auth.Principal{UserID: 1}})
+	handler := NewHandler(nil, nil, testAuthorizer{principal: auth.Principal{UserID: 1}}, nil)
 	request := httptest.NewRequest(http.MethodPost, "/api/databases", strings.NewReader(`{"name":"db"}`))
 	response := httptest.NewRecorder()
 	handler.CreateDatabase(response, request)
@@ -174,7 +174,7 @@ func TestCreateDatabaseHandlerDoesNotReturnPassword(t *testing.T) {
 	repository := newMemoryRegistryRepository()
 	protector := testProtector(t)
 	registry := NewRegistryService(repository, NewConnectionManager(repository, protector), protector)
-	handler := NewHandler(registry, nil, testAuthorizer{principal: auth.Principal{UserID: 1, IsPlatformAdmin: true}})
+	handler := NewHandler(registry, nil, testAuthorizer{principal: auth.Principal{UserID: 1, IsPlatformAdmin: true}}, nil)
 	request := httptest.NewRequest(http.MethodPost, "/api/databases", strings.NewReader(`{"name":"inventory","host":"db","port":5432,"databaseName":"app","username":"viewer","sslMode":"disable","password":"top-secret"}`))
 	response := httptest.NewRecorder()
 	handler.CreateDatabase(response, request)

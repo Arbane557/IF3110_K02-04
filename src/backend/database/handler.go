@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"html/template"
 	"io"
 	"net/http"
 	"strconv"
@@ -15,6 +16,7 @@ type Handler struct {
 	registry    *RegistryService
 	catalog     *CatalogService
 	authorizer  Authorizer
+	templates   *template.Template
 }
 
 type Authorizer interface {
@@ -22,8 +24,14 @@ type Authorizer interface {
 	AuthorizeDatabase(context.Context, auth.Principal, int64, string) error
 }
 
-func NewHandler(registry *RegistryService, catalog *CatalogService, authorizer Authorizer) *Handler {
-	return &Handler{registry: registry, catalog: catalog, authorizer: authorizer}
+func NewHandler(registry *RegistryService, catalog *CatalogService, authorizer Authorizer, templates *template.Template) *Handler {
+	return &Handler{registry: registry, catalog: catalog, authorizer: authorizer, templates: templates}
+}
+
+func (h *Handler) DatabasePage(w http.ResponseWriter, r *http.Request) {
+	if err := h.templates.ExecuteTemplate(w, "databases.html", nil); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
 }
 
 func (h *Handler) ListDatabases(w http.ResponseWriter, r *http.Request) {
@@ -38,13 +46,23 @@ func (h *Handler) ListDatabases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if principal.IsPlatformAdmin {
+		for i := range items {
+			items[i].AccessLevel = "edit"
+		}
 		writeJSON(w, http.StatusOK, items)
 		return
 	}
 	visible := make([]DatabaseSummary, 0, len(items))
 	for _, item := range items {
-		err := h.authorizer.AuthorizeDatabase(r.Context(), principal, int64(item.ID), auth.ActionView)
+		err := h.authorizer.AuthorizeDatabase(r.Context(), principal, int64(item.ID), auth.ActionEdit)
 		if err == nil {
+			item.AccessLevel = "edit"
+			visible = append(visible, item)
+		} else if !errors.Is(err, auth.ErrForbidden) {
+			writeServiceError(w, err)
+			return
+		} else if err := h.authorizer.AuthorizeDatabase(r.Context(), principal, int64(item.ID), auth.ActionView); err == nil {
+			item.AccessLevel = "view"
 			visible = append(visible, item)
 		} else if !errors.Is(err, auth.ErrForbidden) {
 			writeServiceError(w, err)
