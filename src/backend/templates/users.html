@@ -10,17 +10,21 @@
     <main>
         <nav class="topbar">
             <a href="/databases">Databases</a>
-            <a href="/groups">Groups</a>
             <a href="/migrations">Migrations</a>
+            <a href="/auth">Users</a>
+            <a href="/groups">Groups</a>
             <form method="post" action="/logout"><button type="submit">Logout</button></form>
         </nav>
         <h1>User management</h1>
-        <form id="register-form">
-            <label>Username<input name="username" required maxlength="100" autocomplete="username"></label>
-            <label>Password<input name="password" type="password" required minlength="8" maxlength="72" autocomplete="new-password"></label>
-            <button type="submit">Create user</button>
-        </form>
-        <p id="register-status" class="status" role="status" aria-live="polite"></p>
+        <section>
+            <h2>Add user</h2>
+            <form id="register-form">
+                <label>Username<input name="username" required maxlength="100" autocomplete="username"></label>
+                <label>Password<input name="password" type="password" required minlength="8" maxlength="72" autocomplete="new-password"></label>
+                <button type="submit">Create user</button>
+            </form>
+            <p id="register-status" class="status" role="status" aria-live="polite"></p>
+        </section>
     </main>
     <script>
         const form = document.querySelector("#register-form");

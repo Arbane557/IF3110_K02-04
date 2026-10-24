@@ -10,6 +10,9 @@
     <main class="wide">
         <nav class="topbar">
             <a href="/databases">Databases</a>
+            <a href="/migrations">Migrations</a>
+            <a id="users-link" href="/auth" hidden>Users</a>
+            <a id="groups-link" href="/groups" hidden>Groups</a>
             <form method="post" action="/logout"><button type="submit">Logout</button></form>
         </nav>
 
@@ -37,6 +40,12 @@
     <script>
         const databaseSelect = document.querySelector("#database-select");
         const migrationStatus = document.querySelector("#migration-status");
+
+        fetch("/whoami").then(response => response.json()).then(user => {
+            const isAdmin = user.role === "ADMIN";
+            document.querySelector("#users-link").hidden = !isAdmin;
+            document.querySelector("#groups-link").hidden = !isAdmin;
+        });
 
         async function loadDatabases() {
             try {
