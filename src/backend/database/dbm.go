@@ -12,6 +12,7 @@ import (
 const (
 	ActionManageRegistry = "database:manage"
 	ActionView           = "database:view"
+	ActionEdit           = "database:edit"
 )
 
 type Principal struct {
@@ -295,7 +296,6 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
 	}
 }
-
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
