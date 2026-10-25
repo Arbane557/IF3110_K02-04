@@ -87,6 +87,28 @@ button:disabled {
     align-self: end;
 }
 
+.viewer-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 20px;
+}
+
+.resource-list {
+    margin: 0;
+    padding-left: 20px;
+}
+
+.resource-list li {
+    margin: 8px 0;
+}
+
+.pager {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+}
+
 .role-options {
     display: flex;
     flex-wrap: wrap;

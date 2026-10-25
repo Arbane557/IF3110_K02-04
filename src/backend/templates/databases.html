@@ -52,13 +52,77 @@
                 </table>
             </div>
         </section>
+
+        <section id="viewer-section" hidden>
+            <h2>Schema viewer</h2>
+            <p id="selected-database" class="status"></p>
+            <div class="viewer-grid">
+                <div>
+                    <h3>Schemas</h3>
+                    <p id="schema-status" class="status" role="status"></p>
+                    <ul id="schema-list" class="resource-list"></ul>
+                </div>
+                <div>
+                    <h3 id="tables-heading">Tables</h3>
+                    <p id="table-status" class="status" role="status"></p>
+                    <ul id="table-list" class="resource-list"></ul>
+                </div>
+            </div>
+
+            <div id="table-details" hidden>
+                <h3 id="table-heading">Table details</h3>
+                <div class="viewer-grid">
+                    <div>
+                        <h4>Columns</h4>
+                        <div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>Default</th></tr></thead><tbody id="column-list"></tbody></table></div>
+                    </div>
+                    <div>
+                        <h4>Constraints</h4>
+                        <ul id="constraint-list" class="resource-list"></ul>
+                        <h4>Indexes</h4>
+                        <ul id="index-list" class="resource-list"></ul>
+                    </div>
+                </div>
+                <h4>Data</h4>
+                <p id="row-status" class="status" role="status"></p>
+                <div class="table-wrap"><table><thead id="row-head"></thead><tbody id="row-list"></tbody></table></div>
+                <div class="pager">
+                    <button id="previous-page" type="button">Previous</button>
+                    <span id="page-label"></span>
+                    <button id="next-page" type="button">Next</button>
+                </div>
+            </div>
+        </section>
     </main>
     <script>
         const form = document.querySelector("#database-form");
         const formStatus = document.querySelector("#form-status");
         const listStatus = document.querySelector("#list-status");
         const databaseList = document.querySelector("#database-list");
+        const viewerSection = document.querySelector("#viewer-section");
+        const selectedDatabase = document.querySelector("#selected-database");
+        const schemaStatus = document.querySelector("#schema-status");
+        const schemaList = document.querySelector("#schema-list");
+        const tableStatus = document.querySelector("#table-status");
+        const tableList = document.querySelector("#table-list");
+        const tablesHeading = document.querySelector("#tables-heading");
+        const detailsSection = document.querySelector("#table-details");
+        const tableHeading = document.querySelector("#table-heading");
+        const columnList = document.querySelector("#column-list");
+        const constraintList = document.querySelector("#constraint-list");
+        const indexList = document.querySelector("#index-list");
+        const rowStatus = document.querySelector("#row-status");
+        const rowHead = document.querySelector("#row-head");
+        const rowList = document.querySelector("#row-list");
+        const previousPage = document.querySelector("#previous-page");
+        const nextPage = document.querySelector("#next-page");
+        const pageLabel = document.querySelector("#page-label");
         let currentRole = "USER";
+        let selected = null;
+        let selectedSchema = null;
+        let selectedTable = null;
+        let currentPage = 1;
+        const pageSize = 50;
 
         async function requestJSON(url, options = {}) {
             const method = (options.method || "GET").toUpperCase();
@@ -108,7 +172,11 @@
                         });
                         action.append(button);
                     } else {
-                        action.textContent = "Available to your role";
+                        const button = document.createElement("button");
+                        button.type = "button";
+                        button.textContent = "Browse schema";
+                        button.addEventListener("click", () => openViewer(database));
+                        action.append(button);
                     }
                     row.append(name, id, access, action);
                     databaseList.append(row);
@@ -136,6 +204,159 @@
                 await loadDatabases();
             } catch (error) {
                 formStatus.textContent = error.message;
+            }
+        });
+
+        async function openViewer(database) {
+            selected = database;
+            selectedSchema = null;
+            selectedTable = null;
+            currentPage = 1;
+            viewerSection.hidden = false;
+            selectedDatabase.textContent = `Database: ${database.name}`;
+            schemaList.replaceChildren();
+            tableList.replaceChildren();
+            detailsSection.hidden = true;
+            tablesHeading.textContent = "Tables";
+            schemaStatus.textContent = "Loading schemas...";
+            tableStatus.textContent = "Choose a schema.";
+            try {
+                const schemas = await requestJSON(`/api/databases/${database.id}/schemas`);
+                schemaStatus.textContent = schemas.length ? "" : "No visible schemas.";
+                for (const schema of schemas) {
+                    const item = document.createElement("li");
+                    const button = document.createElement("button");
+                    button.type = "button";
+                    button.textContent = schema.name;
+                    button.addEventListener("click", () => loadTables(schema.name));
+                    item.append(button);
+                    schemaList.append(item);
+                }
+            } catch (error) {
+                schemaStatus.textContent = error.message;
+            }
+        }
+
+        async function loadTables(schema) {
+            selectedSchema = schema;
+            selectedTable = null;
+            detailsSection.hidden = true;
+            tableList.replaceChildren();
+            tablesHeading.textContent = `Tables in ${schema}`;
+            tableStatus.textContent = "Loading tables...";
+            try {
+                const tables = await requestJSON(`/api/databases/${selected.id}/schemas/${encodeURIComponent(schema)}/tables`);
+                tableStatus.textContent = tables.length ? "" : "No tables in this schema.";
+                for (const table of tables) {
+                    const item = document.createElement("li");
+                    const button = document.createElement("button");
+                    button.type = "button";
+                    button.textContent = `${table.name} (${table.type})`;
+                    button.addEventListener("click", () => loadTableDetails(table.name));
+                    item.append(button);
+                    tableList.append(item);
+                }
+            } catch (error) {
+                tableStatus.textContent = error.message;
+            }
+        }
+
+        async function loadTableDetails(table) {
+            selectedTable = table;
+            currentPage = 1;
+            detailsSection.hidden = false;
+            tableHeading.textContent = `${selectedSchema}.${table}`;
+            columnList.replaceChildren();
+            constraintList.replaceChildren();
+            indexList.replaceChildren();
+            rowStatus.textContent = "Loading table details...";
+            try {
+                const base = `/api/databases/${selected.id}/schemas/${encodeURIComponent(selectedSchema)}/tables/${encodeURIComponent(table)}`;
+                const [details] = await Promise.all([requestJSON(base), loadRows(base)]);
+                for (const column of details.columns) {
+                    const row = document.createElement("tr");
+                    for (const value of [column.name, column.dataType, column.nullable ? "yes" : "no", column.default ?? ""]) {
+                        const cell = document.createElement("td");
+                        cell.textContent = value;
+                        row.append(cell);
+                    }
+                    columnList.append(row);
+                }
+                renderDefinitionList(constraintList, details.constraints, value => `${value.name}: ${value.type} - ${value.definition}`);
+                renderDefinitionList(indexList, details.indexes, value => `${value.name}: ${value.definition}`);
+                rowStatus.textContent = "";
+            } catch (error) {
+                rowStatus.textContent = error.message;
+            }
+        }
+
+        async function loadRows(base) {
+            const rows = await requestJSON(`${base}/rows?page=${currentPage}&pageSize=${pageSize}`);
+            rowHead.replaceChildren();
+            rowList.replaceChildren();
+            const header = document.createElement("tr");
+            for (const column of rows.columns) {
+                const cell = document.createElement("th");
+                cell.textContent = column;
+                header.append(cell);
+            }
+            rowHead.append(header);
+            for (const value of rows.rows) {
+                const row = document.createElement("tr");
+                for (const column of rows.columns) {
+                    const cell = document.createElement("td");
+                    cell.textContent = displayValue(value[column]);
+                    row.append(cell);
+                }
+                rowList.append(row);
+            }
+            previousPage.disabled = currentPage <= 1;
+            nextPage.disabled = rows.rows.length < pageSize;
+            pageLabel.textContent = `Page ${currentPage}`;
+        }
+
+        function renderDefinitionList(list, values, formatter) {
+            list.replaceChildren();
+            if (!values.length) {
+                const item = document.createElement("li");
+                item.textContent = "None";
+                list.append(item);
+                return;
+            }
+            for (const value of values) {
+                const item = document.createElement("li");
+                item.textContent = formatter(value);
+                list.append(item);
+            }
+        }
+
+        function displayValue(value) {
+            if (value === null || value === undefined) return "NULL";
+            return typeof value === "object" ? JSON.stringify(value) : String(value);
+        }
+
+        function selectedTableBaseURL() {
+            return `/api/databases/${selected.id}/schemas/${encodeURIComponent(selectedSchema)}/tables/${encodeURIComponent(selectedTable)}`;
+        }
+
+        previousPage.addEventListener("click", async () => {
+            if (!selectedTable || currentPage <= 1) return;
+            currentPage--;
+            try {
+                await loadRows(selectedTableBaseURL());
+            } catch (error) {
+                rowStatus.textContent = error.message;
+            }
+        });
+
+        nextPage.addEventListener("click", async () => {
+            if (!selectedTable) return;
+            currentPage++;
+            try {
+                await loadRows(selectedTableBaseURL());
+            } catch (error) {
+                currentPage--;
+                rowStatus.textContent = error.message;
             }
         });
 
