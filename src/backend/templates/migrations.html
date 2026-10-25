@@ -47,9 +47,14 @@
             <div class="migration-actions">
                 <button id="new-migration" type="button" hidden>New draft</button>
                 <button id="save-migration" type="button" hidden disabled>Save draft</button>
+                <button id="preview-plan" type="button" hidden disabled>Preview plan</button>
                 <button id="execute-migration" type="button" hidden disabled>Execute migration</button>
             </div>
             <p id="editor-status" class="status" role="status" aria-live="polite"></p>
+            <section id="plan-section" hidden>
+                <h3>Query plan</h3>
+                <pre id="plan-output"></pre>
+            </section>
         </section>
     </main>
     <script>
@@ -61,7 +66,10 @@
         const editorStatus = document.querySelector("#editor-status");
         const newButton = document.querySelector("#new-migration");
         const saveButton = document.querySelector("#save-migration");
+        const previewButton = document.querySelector("#preview-plan");
         const executeButton = document.querySelector("#execute-migration");
+        const planSection = document.querySelector("#plan-section");
+        const planOutput = document.querySelector("#plan-output");
         let currentDatabase = null;
         let currentVersion = null;
         let currentStatus = "";
@@ -83,8 +91,10 @@
             sqlEditor.readOnly = !canEdit || !isDraft;
             newButton.hidden = !canEdit;
             saveButton.hidden = !canEdit;
+            previewButton.hidden = !canEdit || !isDraft;
             executeButton.hidden = !canEdit || currentVersion === null || currentStatus !== "draft";
             saveButton.disabled = !canEdit || !isDraft || !sqlEditor.value.trim();
+            previewButton.disabled = !canEdit || !isDraft || !sqlEditor.value.trim();
             executeButton.disabled = !canEdit || currentVersion === null || currentStatus !== "draft";
         }
 
@@ -96,6 +106,8 @@
                 ? "Select a migration or start a new draft."
                 : "View Only access: you can inspect migration SQL and history.";
             editorStatus.textContent = "";
+            planSection.hidden = true;
+            planOutput.textContent = "";
             updateEditorControls();
         }
 
@@ -143,6 +155,8 @@
                 currentVersion = migration.version;
                 currentStatus = migration.status;
                 sqlEditor.value = migration.sql;
+                planSection.hidden = true;
+                planOutput.textContent = "";
                 editorHelp.textContent = `Version ${migration.version} - ${migration.status}`;
                 editorStatus.textContent = migration.errorMessage || "";
                 updateEditorControls();
@@ -188,7 +202,8 @@
         });
 
         sqlEditor.addEventListener("input", () => {
-            saveButton.disabled = !sqlEditor.value.trim();
+            planSection.hidden = true;
+            updateEditorControls();
         });
 
         newButton.addEventListener("click", () => {
@@ -215,6 +230,30 @@
                 await loadMigration(migration.version);
             } catch (error) {
                 editorStatus.textContent = error.message;
+            }
+        });
+
+        previewButton.addEventListener("click", async () => {
+            if (!currentDatabase || !sqlEditor.value.trim()) return;
+            previewButton.disabled = true;
+            editorStatus.textContent = "Running EXPLAIN...";
+            planSection.hidden = true;
+            try {
+                const result = await requestJSON(
+                    `/api/databases/${currentDatabase.id}/migrations/explain`,
+                    {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ sql: sqlEditor.value }),
+                    },
+                );
+                planOutput.textContent = result.plan;
+                planSection.hidden = false;
+                editorStatus.textContent = "";
+            } catch (error) {
+                editorStatus.textContent = error.message;
+            } finally {
+                updateEditorControls();
             }
         });
 

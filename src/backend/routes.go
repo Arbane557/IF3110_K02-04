@@ -77,5 +77,6 @@ func (app *App) registerMigrationRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/databases/{databaseID}/migrations", change(migration.CreateMigration))
 	mux.Handle("GET /api/databases/{databaseID}/migrations/{version}", get(migration.GetMigration))
 	mux.Handle("PUT /api/databases/{databaseID}/migrations/{version}", change(migration.UpdateMigration))
+	mux.Handle("POST /api/databases/{databaseID}/migrations/explain", change(migration.ExplainMigration))
 	mux.Handle("POST /api/databases/{databaseID}/migrations/{version}/execute", change(migration.ExecuteMigration))
 }

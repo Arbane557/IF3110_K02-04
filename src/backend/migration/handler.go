@@ -101,6 +101,23 @@ func (h *Handler) ExecuteMigration(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (h *Handler) ExplainMigration(w http.ResponseWriter, r *http.Request) {
+	id, _, ok := h.authorize(w, r, auth.ActionEdit)
+	if !ok {
+		return
+	}
+	request, ok := decodeRequest(w, r)
+	if !ok {
+		return
+	}
+	plan, err := h.service.Explain(r.Context(), id, request.SQL)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"plan": plan})
+}
+
 func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, action string) (database.DatabaseID, auth.Principal, bool) {
 	value, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
 	if err != nil || value <= 0 {

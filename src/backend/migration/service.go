@@ -144,6 +144,26 @@ func (s *Service) Update(ctx context.Context, databaseID database.DatabaseID, ve
 	return item, nil
 }
 
+func (s *Service) Explain(ctx context.Context, databaseID database.DatabaseID, sqlText string) (string, error) {
+	if err := validateSQL(sqlText); err != nil {
+		return "", err
+	}
+	pool, err := s.pools.Pool(ctx, databaseID)
+	if err != nil {
+		return "", err
+	}
+	rows, err := pool.Query(ctx, "EXPLAIN "+sqlText)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	lines, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
 func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, version, userID int64) (Migration, error) {
 	if version <= 0 || userID <= 0 {
 		return Migration{}, ErrInvalidVersion
