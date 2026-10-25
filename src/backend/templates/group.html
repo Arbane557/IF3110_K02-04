@@ -11,6 +11,7 @@
         <nav class="topbar">
             <a href="/databases">Databases</a><a href="/migrations">Migrations</a>
             <a href="/auth">Users</a><a href="/groups">Groups</a>
+            <span id="profile" class="profile">Loading profile...</span>
             <form method="post" action="/logout"><input type="hidden" name="_csrf" value="{{.CSRFToken}}"><button type="submit">Logout</button></form>
         </nav>
         <p><a href="/groups">Back to groups</a></p>
@@ -126,6 +127,11 @@
         });
         loadGroup().catch(error => {
             document.querySelector("#group-name").textContent = error.message;
+        });
+    </script>
+    <script>
+        fetch("/whoami").then(response => response.json()).then(user => {
+            document.querySelector("#profile").textContent = `Signed in: ${user.username} (${user.role})`;
         });
     </script>
 </body>

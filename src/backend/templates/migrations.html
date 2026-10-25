@@ -13,6 +13,7 @@
             <a href="/migrations">Migrations</a>
             <a id="users-link" href="/auth" hidden>Users</a>
             <a id="groups-link" href="/groups" hidden>Groups</a>
+            <span id="profile" class="profile">Loading profile...</span>
             <form method="post" action="/logout"><input type="hidden" name="_csrf" value="{{.CSRFToken}}"><button type="submit">Logout</button></form>
         </nav>
 
@@ -279,6 +280,7 @@
 
         fetch("/whoami").then(response => response.json()).then(user => {
             const isAdmin = user.role === "ADMIN";
+            document.querySelector("#profile").textContent = `Signed in: ${user.username} (${user.role})`;
             document.querySelector("#users-link").hidden = !isAdmin;
             document.querySelector("#groups-link").hidden = !isAdmin;
         });
