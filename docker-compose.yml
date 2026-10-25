@@ -1,20 +1,10 @@
 services:
-  frontend:
-    build:
-      context: ./src/frontend
-      dockerfile: dockerfile
-    ports:
-      - "6767:6767"
-    depends_on:
-      - backend
-
   backend:
-    build:
-      context: ./src/backend
-      dockerfile: dockerfile
+    build: ./src/backend
     ports:
       - "6969:6969"
     environment:
+      CREDENTIAL_ENCRYPTION_KEY: "93ad4404cc00969ffe09ea9ef41653921074a743803b7b9f519f783020367921"
       DATABASE_URL: postgres://app:secret@database:5432/app?sslmode=disable
     depends_on:
       database:
@@ -22,17 +12,32 @@ services:
 
   database:
     image: postgres:17
+    ports:
+      - "55432:5432"
     environment:
       POSTGRES_DB: app
       POSTGRES_USER: app
       POSTGRES_PASSWORD: secret
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./src/backend/db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U app -d app"]
       interval: 5s
       timeout: 5s
       retries: 10
+    
+  target-db-1:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: tes1
+      POSTGRES_USER: tes1
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5433:5432"
+    volumes:
+      - target_data:/var/lib/postgresql/data
 
 volumes:
   postgres_data:
+  target_data:

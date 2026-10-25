@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Groups</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <main>
+        <nav class="topbar">
+            <a href="/databases">Databases</a><a href="/migrations">Migrations</a>
+            <a href="/auth">Users</a><a href="/groups">Groups</a>
+            <form method="post" action="/logout"><input type="hidden" name="_csrf" value="{{.CSRFToken}}"><button type="submit">Logout</button></form>
+        </nav>
+        <h1>Group management</h1>
+        <section>
+            <h2>Add group</h2>
+            <form id="group-form" class="form-grid">
+                <label>Group name<input name="name" required maxlength="100"></label>
+                <button type="submit">Add group</button>
+            </form>
+            <p id="form-status" class="status" role="status" aria-live="polite"></p>
+        </section>
+        <section>
+            <h2>Groups</h2>
+            <p id="list-status" class="status" role="status" aria-live="polite">Loading groups...</p>
+            <ul id="group-list"></ul>
+        </section>
+    </main>
+    <script>
+        async function requestJSON(url, options = {}) {
+            const method = (options.method || "GET").toUpperCase();
+            const headers = new Headers(options.headers || {});
+            if (!["GET", "HEAD", "OPTIONS"].includes(method)) headers.set("X-CSRF-Token", document.querySelector('input[name="_csrf"]').value);
+            const response = await fetch(url, { ...options, method, headers });
+            const payload = response.status === 204 ? null : await response.json();
+            if (!response.ok) throw new Error(payload?.error || `Request failed (${response.status})`);
+            return payload;
+        }
+        async function loadGroups() {
+            const status = document.querySelector("#list-status");
+            const list = document.querySelector("#group-list");
+            try {
+                const groups = await requestJSON("/api/auth/groups");
+                list.replaceChildren();
+                status.textContent = groups.length ? "" : "No groups yet.";
+                for (const group of groups) {
+                    const item = document.createElement("li");
+                    const link = document.createElement("a");
+                    link.href = `/groups/${group.id}`;
+                    link.textContent = group.name;
+                    item.append(link);
+                    list.append(item);
+                }
+            } catch (error) { status.textContent = error.message; }
+        }
+        document.querySelector("#group-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const status = document.querySelector("#form-status");
+            const form = event.currentTarget;
+            try {
+                await requestJSON("/api/auth/groups", {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(Object.fromEntries(new FormData(form))),
+                });
+                form.reset();
+                status.textContent = "Group created.";
+                await loadGroups();
+            } catch (error) { status.textContent = error.message; }
+        });
+        loadGroups();
+    </script>
+</body>
+</html>

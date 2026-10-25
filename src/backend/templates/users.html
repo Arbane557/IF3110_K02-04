@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User management</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <main>
+        <nav class="topbar">
+            <a href="/databases">Databases</a>
+            <a href="/migrations">Migrations</a>
+            <a href="/auth">Users</a>
+            <a href="/groups">Groups</a>
+            <form method="post" action="/logout"><input type="hidden" name="_csrf" value="{{.CSRFToken}}"><button type="submit">Logout</button></form>
+        </nav>
+        <h1>User management</h1>
+        <section>
+            <h2>Add user</h2>
+            <form id="register-form">
+                <label>Username<input name="username" required maxlength="100" autocomplete="username"></label>
+                <label>Password<input name="password" type="password" required minlength="8" maxlength="72" autocomplete="new-password"></label>
+                <button type="submit">Create user</button>
+            </form>
+            <p id="register-status" class="status" role="status" aria-live="polite"></p>
+        </section>
+        <section>
+            <h2>Users</h2>
+            <p id="users-status" class="status" role="status" aria-live="polite">Loading users...</p>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Username</th><th>Role</th><th>Action</th></tr></thead>
+                    <tbody id="users-list"></tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+    <script>
+        const form = document.querySelector("#register-form");
+        const status = document.querySelector("#register-status");
+        const usersStatus = document.querySelector("#users-status");
+        const usersList = document.querySelector("#users-list");
+        const csrfToken = document.querySelector('input[name="_csrf"]').value;
+
+        async function requestJSON(url, options = {}) {
+            const response = await fetch(url, {
+                ...options,
+                headers: { ...(options.headers || {}), "X-CSRF-Token": csrfToken },
+            });
+            const payload = response.status === 204 ? null : await response.json();
+            if (!response.ok) throw new Error(payload?.error || `Request failed (${response.status})`);
+            return payload;
+        }
+
+        async function loadUsers() {
+            try {
+                const users = await requestJSON("/api/auth/users");
+                usersList.replaceChildren();
+                usersStatus.textContent = users.length ? "" : "No users yet.";
+                for (const user of users) {
+                    const row = document.createElement("tr");
+                    const username = document.createElement("td");
+                    const role = document.createElement("td");
+                    const action = document.createElement("td");
+                    username.textContent = user.username;
+                    role.textContent = user.role;
+                    if (user.role !== "ADMIN") {
+                        const button = document.createElement("button");
+                        button.type = "button";
+                        button.textContent = "Make admin";
+                        button.addEventListener("click", async () => {
+                            button.disabled = true;
+                            try {
+                                await requestJSON(`/api/auth/users/${user.id}/admin`, { method: "PUT" });
+                                await loadUsers();
+                                usersStatus.textContent = `${user.username} is now an admin. Their active sessions will rotate on their next request.`;
+                            } catch (error) {
+                                usersStatus.textContent = error.message;
+                                button.disabled = false;
+                            }
+                        });
+                        action.append(button);
+                    } else {
+                        action.textContent = "—";
+                    }
+                    row.append(username, role, action);
+                    usersList.append(row);
+                }
+            } catch (error) {
+                usersStatus.textContent = error.message;
+            }
+        }
+
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            status.textContent = "Creating user…";
+            const values = Object.fromEntries(new FormData(form));
+            try {
+                const result = await requestJSON("/api/auth/register", {
+                    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
+                });
+                form.reset();
+                status.textContent = `Created user ${result.username}.`;
+                await loadUsers();
+            } catch (error) {
+                status.textContent = error.message;
+            }
+        });
+
+        loadUsers();
+    </script>
+</body>
+</html>

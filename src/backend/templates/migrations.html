@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Migrations</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <main class="wide">
+        <nav class="topbar">
+            <a href="/databases">Databases</a>
+            <a href="/migrations">Migrations</a>
+            <a id="users-link" href="/auth" hidden>Users</a>
+            <a id="groups-link" href="/groups" hidden>Groups</a>
+            <form method="post" action="/logout"><input type="hidden" name="_csrf" value="{{.CSRFToken}}"><button type="submit">Logout</button></form>
+        </nav>
+
+        <h1>Migrations</h1>
+        <section>
+            <label for="database-select">Database</label>
+            <select id="database-select" disabled>
+                <option>Loading databases...</option>
+            </select>
+            <p id="migration-status" class="status" role="status" aria-live="polite"></p>
+        </section>
+
+        <section>
+            <h2>Migration history</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr><th>Version</th><th>Created by</th><th>Executed by</th><th>Time</th><th>Status</th></tr>
+                    </thead>
+                    <tbody id="migration-list">
+                        <tr><td colspan="5">Select a database to load migration history.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section>
+            <h2>Migration SQL</h2>
+            <p id="editor-help">Select a migration to view its SQL.</p>
+            <label for="migration-sql">SQL</label>
+            <textarea id="migration-sql" rows="14" spellcheck="false" placeholder="Select a migration or start a new draft." readonly></textarea>
+            <div class="migration-actions">
+                <button id="new-migration" type="button" hidden>New draft</button>
+                <button id="save-migration" type="button" hidden disabled>Save draft</button>
+                <button id="preview-plan" type="button" hidden disabled>Preview plan</button>
+                <button id="execute-migration" type="button" hidden disabled>Execute migration</button>
+            </div>
+            <p id="editor-status" class="status" role="status" aria-live="polite"></p>
+            <section id="plan-section" hidden>
+                <h3>Query plan</h3>
+                <pre id="plan-output"></pre>
+            </section>
+        </section>
+    </main>
+    <script>
+        const databaseSelect = document.querySelector("#database-select");
+        const migrationStatus = document.querySelector("#migration-status");
+        const migrationList = document.querySelector("#migration-list");
+        const sqlEditor = document.querySelector("#migration-sql");
+        const editorHelp = document.querySelector("#editor-help");
+        const editorStatus = document.querySelector("#editor-status");
+        const newButton = document.querySelector("#new-migration");
+        const saveButton = document.querySelector("#save-migration");
+        const previewButton = document.querySelector("#preview-plan");
+        const executeButton = document.querySelector("#execute-migration");
+        const planSection = document.querySelector("#plan-section");
+        const planOutput = document.querySelector("#plan-output");
+        let currentDatabase = null;
+        let currentVersion = null;
+        let currentStatus = "";
+        let migrations = [];
+
+        async function requestJSON(url, options = {}) {
+            const method = (options.method || "GET").toUpperCase();
+            const headers = new Headers(options.headers || {});
+            if (!["GET", "HEAD", "OPTIONS"].includes(method)) headers.set("X-CSRF-Token", document.querySelector('input[name="_csrf"]').value);
+            const response = await fetch(url, { ...options, method, headers });
+            const payload = response.status === 204 ? null : await response.json();
+            if (!response.ok) throw new Error(payload?.error || `Request failed (${response.status})`);
+            return payload;
+        }
+
+        function updateEditorControls() {
+            const canEdit = currentDatabase?.accessLevel === "edit";
+            const isDraft = currentVersion === null || currentStatus === "draft";
+            sqlEditor.readOnly = !canEdit || !isDraft;
+            newButton.hidden = !canEdit;
+            saveButton.hidden = !canEdit;
+            previewButton.hidden = !canEdit || !isDraft;
+            executeButton.hidden = !canEdit || currentVersion === null || currentStatus !== "draft";
+            saveButton.disabled = !canEdit || !isDraft || !sqlEditor.value.trim();
+            previewButton.disabled = !canEdit || !isDraft || !sqlEditor.value.trim();
+            executeButton.disabled = !canEdit || currentVersion === null || currentStatus !== "draft";
+        }
+
+        function resetEditor() {
+            currentVersion = null;
+            currentStatus = "";
+            sqlEditor.value = "";
+            editorHelp.textContent = currentDatabase?.accessLevel === "edit"
+                ? "Select a migration or start a new draft."
+                : "View Only access: you can inspect migration SQL and history.";
+            editorStatus.textContent = "";
+            planSection.hidden = true;
+            planOutput.textContent = "";
+            updateEditorControls();
+        }
+
+        async function loadHistory() {
+            migrationList.replaceChildren();
+            resetEditor();
+            if (!currentDatabase) {
+                migrationList.innerHTML = '<tr><td colspan="5">Select a database to load migration history.</td></tr>';
+                return;
+            }
+            try {
+                migrations = await requestJSON(`/api/databases/${currentDatabase.id}/migrations`);
+                if (migrations.length === 0) {
+                    migrationList.innerHTML = '<tr><td colspan="5">No migrations yet.</td></tr>';
+                    return;
+                }
+                for (const migration of migrations) {
+                    const row = document.createElement("tr");
+                    const versionCell = document.createElement("td");
+                    const select = document.createElement("button");
+                    select.type = "button";
+                    select.textContent = migration.version;
+                    select.addEventListener("click", () => loadMigration(migration.version));
+                    versionCell.append(select);
+                    const createdBy = document.createElement("td");
+                    createdBy.textContent = migration.createdBy;
+                    const executedBy = document.createElement("td");
+                    executedBy.textContent = migration.executedBy ?? "-";
+                    const time = document.createElement("td");
+                    time.textContent = new Date(migration.executedAt || migration.createdAt).toLocaleString();
+                    const status = document.createElement("td");
+                    status.textContent = migration.status;
+                    row.append(versionCell, createdBy, executedBy, time, status);
+                    migrationList.append(row);
+                }
+            } catch (error) {
+                migrationList.innerHTML = '<tr><td colspan="5">Could not load migration history.</td></tr>';
+                migrationStatus.textContent = error.message;
+            }
+        }
+
+        async function loadMigration(version) {
+            try {
+                const migration = await requestJSON(`/api/databases/${currentDatabase.id}/migrations/${version}`);
+                currentVersion = migration.version;
+                currentStatus = migration.status;
+                sqlEditor.value = migration.sql;
+                planSection.hidden = true;
+                planOutput.textContent = "";
+                editorHelp.textContent = `Version ${migration.version} - ${migration.status}`;
+                editorStatus.textContent = migration.errorMessage || "";
+                updateEditorControls();
+            } catch (error) {
+                editorStatus.textContent = error.message;
+            }
+        }
+
+        async function loadDatabases() {
+            try {
+                const databases = await requestJSON("/api/databases");
+                databaseSelect.replaceChildren(new Option("Select a database", ""));
+                for (const database of databases) {
+                    const option = new Option(database.name, database.id);
+                    option.dataset.accessLevel = database.accessLevel || "edit";
+                    databaseSelect.add(option);
+                }
+                databaseSelect.disabled = false;
+                if (databases.length === 0) {
+                    databaseSelect.replaceChildren(new Option("No databases available", ""));
+                    migrationStatus.textContent = "No database is available to your account.";
+                }
+            } catch (error) {
+                databaseSelect.replaceChildren(new Option("Could not load databases", ""));
+                migrationStatus.textContent = error.message;
+            }
+        }
+
+        databaseSelect.addEventListener("change", async () => {
+            const option = databaseSelect.selectedOptions[0];
+            currentDatabase = databaseSelect.value
+                ? { id: databaseSelect.value, accessLevel: option.dataset.accessLevel }
+                : null;
+            migrationStatus.textContent = "";
+            editorStatus.textContent = "";
+            if (currentDatabase?.accessLevel === "edit") {
+                editorHelp.textContent = "Select a migration or start a new draft.";
+            } else {
+                editorHelp.textContent = "View Only access: you can inspect migration SQL and history.";
+            }
+            updateEditorControls();
+            await loadHistory();
+        });
+
+        sqlEditor.addEventListener("input", () => {
+            planSection.hidden = true;
+            updateEditorControls();
+        });
+
+        newButton.addEventListener("click", () => {
+            resetEditor();
+            editorHelp.textContent = "Write SQL and save it as a draft before execution.";
+        });
+
+        saveButton.addEventListener("click", async () => {
+            if (!currentDatabase || !sqlEditor.value.trim()) return;
+            const isUpdate = currentVersion !== null;
+            const url = isUpdate
+                ? `/api/databases/${currentDatabase.id}/migrations/${currentVersion}`
+                : `/api/databases/${currentDatabase.id}/migrations`;
+            try {
+                const migration = await requestJSON(url, {
+                    method: isUpdate ? "PUT" : "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ sql: sqlEditor.value }),
+                });
+                currentVersion = migration.version;
+                currentStatus = migration.status;
+                editorStatus.textContent = `Draft ${migration.version} saved.`;
+                await loadHistory();
+                await loadMigration(migration.version);
+            } catch (error) {
+                editorStatus.textContent = error.message;
+            }
+        });
+
+        previewButton.addEventListener("click", async () => {
+            if (!currentDatabase || !sqlEditor.value.trim()) return;
+            previewButton.disabled = true;
+            editorStatus.textContent = "Running EXPLAIN...";
+            planSection.hidden = true;
+            try {
+                const result = await requestJSON(
+                    `/api/databases/${currentDatabase.id}/migrations/explain`,
+                    {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ sql: sqlEditor.value }),
+                    },
+                );
+                planOutput.textContent = result.plan;
+                planSection.hidden = false;
+                editorStatus.textContent = "";
+            } catch (error) {
+                editorStatus.textContent = error.message;
+            } finally {
+                updateEditorControls();
+            }
+        });
+
+        executeButton.addEventListener("click", async () => {
+            if (!currentDatabase || currentVersion === null) return;
+            const version = currentVersion;
+            if (!confirm(`Execute migration ${version} on ${databaseSelect.selectedOptions[0].text}?`)) return;
+            executeButton.disabled = true;
+            let successMessage = "";
+            try {
+                const migration = await requestJSON(
+                    `/api/databases/${currentDatabase.id}/migrations/${version}/execute`,
+                    { method: "POST" },
+                );
+                successMessage = `Migration ${migration.version} executed.`;
+            } catch (error) {
+                editorStatus.textContent = error.message;
+            }
+            await loadHistory();
+            await loadMigration(version);
+            if (successMessage) editorStatus.textContent = successMessage;
+        });
+
+        fetch("/whoami").then(response => response.json()).then(user => {
+            const isAdmin = user.role === "ADMIN";
+            document.querySelector("#users-link").hidden = !isAdmin;
+            document.querySelector("#groups-link").hidden = !isAdmin;
+        });
+
+        loadDatabases();
+    </script>
+</body>
+</html>

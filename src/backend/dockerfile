@@ -1,9 +1,21 @@
-FROM golang:1.23-alpine
+FROM golang:1.22-alpine AS build
+
+WORKDIR /src
+
+COPY go.mod ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -o /backend .
+
+FROM alpine:3.21
 
 WORKDIR /app
 
-COPY . .
+COPY --from=build /backend /app/backend
+COPY --from=build /src/templates /app/templates
+COPY --from=build /src/static /app/static
 
 EXPOSE 6969
 
-CMD ["go", "run", "."]
+CMD ["/app/backend"]

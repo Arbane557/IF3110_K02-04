@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Group</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <main class="wide">
+        <nav class="topbar">
+            <a href="/databases">Databases</a><a href="/migrations">Migrations</a>
+            <a href="/auth">Users</a><a href="/groups">Groups</a>
+            <form method="post" action="/logout"><input type="hidden" name="_csrf" value="{{.CSRFToken}}"><button type="submit">Logout</button></form>
+        </nav>
+        <p><a href="/groups">Back to groups</a></p>
+        <h1 id="group-name">Group</h1>
+        <section>
+            <h2>Members</h2>
+            <form id="member-form" class="form-grid">
+                <label>Add user<select name="userId" required></select></label>
+                <button type="submit">Add user</button>
+            </form>
+            <p id="member-status" class="status" role="status" aria-live="polite"></p>
+            <ul id="member-list"></ul>
+        </section>
+        <section>
+            <h2>Database access</h2>
+            <p>View Only lets members inspect the database and migration history. View + Edit also lets them create and run migrations.</p>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Database</th><th>Group access</th></tr></thead>
+                    <tbody id="database-list"></tbody>
+                </table>
+            </div>
+            <p id="database-status" class="status" role="status" aria-live="polite"></p>
+        </section>
+    </main>
+    <script>
+        const groupId = location.pathname.split("/").pop();
+        async function requestJSON(url, options = {}) {
+            const method = (options.method || "GET").toUpperCase();
+            const headers = new Headers(options.headers || {});
+            if (!["GET", "HEAD", "OPTIONS"].includes(method)) headers.set("X-CSRF-Token", document.querySelector('input[name="_csrf"]').value);
+            const response = await fetch(url, { ...options, method, headers });
+            const payload = response.status === 204 ? null : await response.json();
+            if (!response.ok) throw new Error(payload?.error || `Request failed (${response.status})`);
+            return payload;
+        }
+        async function loadGroup() {
+            const details = await requestJSON(`/api/auth/groups/${groupId}`);
+            document.title = `${details.group.name} group`;
+            document.querySelector("#group-name").textContent = details.group.name;
+
+            const members = document.querySelector("#member-list");
+            const memberIDs = new Set(details.members.map(user => user.id));
+            members.replaceChildren();
+            for (const user of details.members) {
+                const item = document.createElement("li");
+                item.append(document.createTextNode(user.username));
+                const remove = document.createElement("button");
+                remove.type = "button";
+                remove.textContent = "Remove";
+                remove.addEventListener("click", async () => {
+                    try {
+                        await requestJSON(`/api/auth/groups/${groupId}/members/${user.id}`, { method: "DELETE" });
+                        await loadGroup();
+                    } catch (error) { document.querySelector("#member-status").textContent = error.message; }
+                });
+                item.append(" ", remove);
+                members.append(item);
+            }
+
+            const select = document.querySelector("#member-form select");
+            select.replaceChildren();
+            for (const user of details.users.filter(user => !memberIDs.has(user.id))) {
+                const option = document.createElement("option");
+                option.value = user.id;
+                option.textContent = `${user.username} (${user.role})`;
+                select.append(option);
+            }
+            document.querySelector("#member-form button").disabled = select.options.length === 0;
+
+            const databases = document.querySelector("#database-list");
+            databases.replaceChildren();
+            for (const database of details.databases) {
+                const row = document.createElement("tr");
+                const name = document.createElement("td");
+                const access = document.createElement("td");
+                name.textContent = database.name;
+                const select = document.createElement("select");
+                for (const [value, label] of [["", "No access"], ["view", "View Only"], ["edit", "View + Edit"]]) {
+                    const option = document.createElement("option");
+                    option.value = value;
+                    option.textContent = label;
+                    select.append(option);
+                }
+                select.value = database.accessLevel;
+                select.addEventListener("change", async () => {
+                    try {
+                        await requestJSON(`/api/auth/groups/${groupId}/databases/${database.id}`, {
+                            method: "PUT", headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ accessLevel: select.value }),
+                        });
+                        document.querySelector("#database-status").textContent = "Access saved.";
+                    } catch (error) {
+                        document.querySelector("#database-status").textContent = error.message;
+                    }
+                });
+                access.append(select);
+                row.append(name, access);
+                databases.append(row);
+            }
+        }
+        document.querySelector("#member-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const userId = Number(new FormData(event.currentTarget).get("userId"));
+            try {
+                await requestJSON(`/api/auth/groups/${groupId}/members`, {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ userId }),
+                });
+                document.querySelector("#member-status").textContent = "User added.";
+                await loadGroup();
+            } catch (error) { document.querySelector("#member-status").textContent = error.message; }
+        });
+        loadGroup().catch(error => {
+            document.querySelector("#group-name").textContent = error.message;
+        });
+    </script>
+</body>
+</html>
