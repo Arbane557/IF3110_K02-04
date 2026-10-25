@@ -9,10 +9,13 @@ CREATE TABLE users (
 CREATE TABLE sessions (
     id BIGSERIAL PRIMARY KEY,
     token_hash CHAR(64) NOT NULL UNIQUE,
+    previous_token_hash CHAR(64),
+    previous_token_expires_at TIMESTAMPTZ,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     idle_expires_at TIMESTAMPTZ NOT NULL,
     absolute_expires_at TIMESTAMPTZ NOT NULL,
     last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     revoked_at TIMESTAMPTZ
 );
 

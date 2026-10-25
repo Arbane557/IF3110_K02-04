@@ -13,7 +13,7 @@
             <a href="/migrations">Migrations</a>
             <a href="/auth">Users</a>
             <a href="/groups">Groups</a>
-            <form method="post" action="/logout"><button type="submit">Logout</button></form>
+            <form method="post" action="/logout"><input type="hidden" name="_csrf" value="{{.CSRFToken}}"><button type="submit">Logout</button></form>
         </nav>
         <h1>User management</h1>
         <section>
@@ -36,7 +36,7 @@
             try {
                 const response = await fetch("/api/auth/register", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: { "Content-Type": "application/json", "X-CSRF-Token": document.querySelector('input[name="_csrf"]').value },
                     body: JSON.stringify(values),
                 });
                 const result = await response.json();

@@ -1,19 +1,29 @@
 package auth
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"html/template"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
 const sessionCookieName = "lemonmeloncookie"
+
+const (
+	csrfCookieName = "csrf_token"
+	csrfHeaderName = "X-CSRF-Token"
+)
 
 type Handler struct {
 	service   *Service
@@ -26,14 +36,21 @@ func NewHandler(service *Service, templates *template.Template) *Handler {
 
 func (h *Handler) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(sessionCookieName)
-		if err != nil {
+		if _, err := h.authenticateRequest(w, r); err != nil {
+			clearSessionCookie(w, r)
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
-		if _, err := h.service.UserBySession(r.Context(), cookie.Value); err != nil {
-			clearSessionCookie(w)
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RequireAuthAPI authenticates API requests without redirecting clients to an HTML page.
+func (h *Handler) RequireAuthAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := h.authenticateRequest(w, r); err != nil {
+			clearSessionCookie(w, r)
+			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -43,14 +60,9 @@ func (h *Handler) RequireAuth(next http.Handler) http.Handler {
 // RequireAuthAdmin allows only authenticated platform admins to continue.
 func (h *Handler) RequireAuthAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(sessionCookieName)
+		user, err := h.authenticateRequest(w, r)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		user, err := h.service.UserBySession(r.Context(), cookie.Value)
-		if err != nil {
-			clearSessionCookie(w)
+			clearSessionCookie(w, r)
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -62,38 +74,58 @@ func (h *Handler) RequireAuthAdmin(next http.Handler) http.Handler {
 	})
 }
 
-func (h *Handler) UserFromRequest(r *http.Request) (User, error) {
-	cookie, err := r.Cookie(sessionCookieName)
-	if err != nil {
-		return User{}, err
-	}
-	return h.service.UserBySession(r.Context(), cookie.Value)
+func (h *Handler) RequireCSRF(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		cookie, err := r.Cookie(csrfCookieName)
+		if err != nil {
+			writeError(w, http.StatusForbidden, "csrf token required")
+			return
+		}
+		provided := r.Header.Get(csrfHeaderName)
+		if provided == "" {
+			if err := r.ParseForm(); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid form body")
+				return
+			}
+			provided = r.FormValue("_csrf")
+		}
+		if provided == "" || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(provided)) != 1 {
+			writeError(w, http.StatusForbidden, "invalid csrf token")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		h.renderLogin(w, http.StatusBadRequest, "Bad request")
+		h.renderLogin(w, r, http.StatusBadRequest, "Bad request")
 		return
 	}
 	user, passwordHash, err := h.service.FindUserByUsername(r.Context(), r.FormValue("username"))
 	if errors.Is(err, sql.ErrNoRows) {
-		h.renderLogin(w, http.StatusUnauthorized, "Wrong username or password")
+		h.renderLogin(w, r, http.StatusUnauthorized, "Wrong username or password")
 		return
 	}
 	if err != nil {
-		h.renderLogin(w, http.StatusInternalServerError, "Server error")
+		h.renderLogin(w, r, http.StatusInternalServerError, "Server error")
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(r.FormValue("password"))) != nil {
-		h.renderLogin(w, http.StatusUnauthorized, "Wrong username or password")
+		h.renderLogin(w, r, http.StatusUnauthorized, "Wrong username or password")
 		return
 	}
 	token, expiresAt, err := h.service.CreateSession(r.Context(), user)
 	if err != nil {
-		h.renderLogin(w, http.StatusInternalServerError, "Server error")
+		h.renderLogin(w, r, http.StatusInternalServerError, "Server error")
 		return
 	}
-	setSessionCookie(w, token, expiresAt)
+	setSessionCookie(w, r, token, expiresAt)
+	setCSRFCookie(w, r, CSRFTokenFromRequest(r), expiresAt)
 	destination := "/databases"
 	if user.Role == RoleAdmin {
 		destination = "/auth"
@@ -108,18 +140,14 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	clearSessionCookie(w)
+	clearSessionCookie(w, r)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(sessionCookieName)
+	user, err := h.authenticateRequest(w, r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	user, err := h.service.UserBySession(r.Context(), cookie.Value)
-	if err != nil {
+		clearSessionCookie(w, r)
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -161,15 +189,15 @@ func (h *Handler) RegisterUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) UsersPage(w http.ResponseWriter, r *http.Request) {
-	h.renderTemplate(w, "users.html", nil)
+	h.renderTemplate(w, "users.html", map[string]string{"CSRFToken": CSRFTokenFromRequest(r)})
 }
 
 func (h *Handler) GroupsPage(w http.ResponseWriter, r *http.Request) {
-	h.renderTemplate(w, "groups.html", nil)
+	h.renderTemplate(w, "groups.html", map[string]string{"CSRFToken": CSRFTokenFromRequest(r)})
 }
 
 func (h *Handler) GroupPage(w http.ResponseWriter, r *http.Request) {
-	h.renderTemplate(w, "group.html", nil)
+	h.renderTemplate(w, "group.html", map[string]string{"CSRFToken": CSRFTokenFromRequest(r)})
 }
 
 func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
@@ -316,12 +344,18 @@ func positivePathID(w http.ResponseWriter, r *http.Request, name string) (int64,
 }
 
 func (h *Handler) AuthPage(w http.ResponseWriter, r *http.Request) {
-	h.renderLogin(w, http.StatusOK, "")
+	h.renderLogin(w, r, http.StatusOK, "")
 }
 
-func (h *Handler) renderLogin(w http.ResponseWriter, status int, message string) {
+func (h *Handler) renderLogin(w http.ResponseWriter, r *http.Request, status int, message string) {
+	token, err := ensureCSRFCookie(w, r)
+	if err != nil {
+		http.Error(w, "could not create csrf token", http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(status)
-	if err := h.templates.ExecuteTemplate(w, "login.html", struct{ Error string }{message}); err != nil {
+	data := map[string]string{"Error": message, "CSRFToken": token}
+	if err := h.templates.ExecuteTemplate(w, "login.html", data); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }
@@ -332,17 +366,69 @@ func (h *Handler) renderTemplate(w http.ResponseWriter, name string, data any) {
 	}
 }
 
-func setSessionCookie(w http.ResponseWriter, token string, expiresAt time.Time) {
+func (h *Handler) authenticateRequest(w http.ResponseWriter, r *http.Request) (User, error) {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return User{}, ErrInvalidSession
+	}
+	user, rotatedToken, expiresAt, err := h.service.AuthenticateSession(r.Context(), cookie.Value)
+	if err != nil {
+		return User{}, err
+	}
+	if rotatedToken != "" {
+		setSessionCookie(w, r, rotatedToken, expiresAt)
+	}
+	return user, nil
+}
+
+func ensureCSRFCookie(w http.ResponseWriter, r *http.Request) (string, error) {
+	if cookie, err := r.Cookie(csrfCookieName); err == nil && cookie.Value != "" {
+		return cookie.Value, nil
+	}
+	random := make([]byte, 32)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	token := base64.RawURLEncoding.EncodeToString(random)
+	setCSRFCookie(w, r, token, time.Now().Add(sessionAbsoluteTimeout))
+	return token, nil
+}
+
+// CSRFTokenFromRequest returns the browser-readable token used by page forms and scripts.
+func CSRFTokenFromRequest(r *http.Request) string {
+	cookie, err := r.Cookie(csrfCookieName)
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+
+func secureCookie(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(os.Getenv("APP_ENV"), "production")
+}
+
+func setCSRFCookie(w http.ResponseWriter, r *http.Request, token string, expiresAt time.Time) {
 	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookieName, Value: token, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: expiresAt,
+		Name: csrfCookieName, Value: token, Path: "/", HttpOnly: false,
+		SameSite: http.SameSiteLaxMode, Secure: secureCookie(r), Expires: expiresAt,
 	})
 }
 
-func clearSessionCookie(w http.ResponseWriter) {
+func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expiresAt time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookieName, Value: token, Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secureCookie(r), Expires: expiresAt,
+	})
+}
+
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookieName, Value: "", Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secureCookie(r), MaxAge: -1,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name: csrfCookieName, Value: "", Path: "/",
+		SameSite: http.SameSiteLaxMode, Secure: secureCookie(r), MaxAge: -1,
 	})
 }
 

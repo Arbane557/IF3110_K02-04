@@ -19,6 +19,13 @@ var (
 	ErrInvalidUser  = errors.New("invalid user")
 	ErrUsernameTaken = errors.New("username already exists")
 	ErrInvalidGroup = errors.New("invalid group")
+	ErrInvalidSession = errors.New("invalid or expired session")
+)
+
+const (
+	sessionIdleTimeout      = 30 * time.Minute
+	sessionAbsoluteTimeout  = 24 * time.Hour
+	sessionRotationInterval = 15 * time.Minute
 )
 
 // User is the authenticated account exposed to the application layer.
@@ -220,45 +227,87 @@ func (s *Service) RemoveGroupDatabaseAccess(ctx context.Context, groupID, databa
 }
 
 func (s *Service) CreateSession(ctx context.Context, user User) (string, time.Time, error) {
-	randomBytes := make([]byte, 32)
-	if _, err := rand.Read(randomBytes); err != nil {
+	token, err := newSessionToken()
+	if err != nil {
 		return "", time.Time{}, err
 	}
-
-	token := base64.RawURLEncoding.EncodeToString(randomBytes)
 	now := time.Now()
-	expiresAt := now.Add(24 * time.Hour)
-	_, err := s.db.ExecContext(ctx, `
+	expiresAt := now.Add(sessionAbsoluteTimeout).Truncate(time.Microsecond)
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO sessions (token_hash, user_id, idle_expires_at, absolute_expires_at)
 		VALUES ($1, $2, $3, $4)
-	`, hashToken(token), user.ID, now.Add(30*time.Minute), expiresAt)
+	`, hashToken(token), user.ID, now.Add(sessionIdleTimeout), expiresAt)
 	return token, expiresAt, err
 }
 
-func (s *Service) UserBySession(ctx context.Context, token string) (User, error) {
+func (s *Service) AuthenticateSession(ctx context.Context, token string) (User, string, time.Time, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, "", time.Time{}, err
+	}
+	defer tx.Rollback()
+
 	var user User
 	var isAdmin bool
+	var sessionID int64
+	var currentTokenHash string
+	var rotatedAt time.Time
+	var absoluteExpiresAt time.Time
 	tokenHash := hashToken(token)
-	err := s.db.QueryRowContext(ctx, `
-		SELECT u.id, u.username, u.is_admin
+	err = tx.QueryRowContext(ctx, `
+		SELECT s.id, s.token_hash, s.rotated_at, s.absolute_expires_at,
+		       u.id, u.username, u.is_admin
 		FROM sessions s
 		JOIN users u ON u.id = s.user_id
-		WHERE s.token_hash = $1
+		WHERE (s.token_hash = $1 OR
+		       (s.previous_token_hash = $1 AND s.previous_token_expires_at > NOW()))
 		  AND s.revoked_at IS NULL
 		  AND s.idle_expires_at > NOW()
 		  AND s.absolute_expires_at > NOW()
-	`, tokenHash).Scan(&user.ID, &user.Username, &isAdmin)
+		FOR UPDATE OF s
+	`, tokenHash).Scan(&sessionID, &currentTokenHash, &rotatedAt, &absoluteExpiresAt,
+		&user.ID, &user.Username, &isAdmin)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, "", time.Time{}, ErrInvalidSession
+	}
 	if err != nil {
-		return User{}, err
+		return User{}, "", time.Time{}, err
 	}
 	user.Role = roleForAdminFlag(isAdmin)
 
-	_, err = s.db.ExecContext(ctx, `
-		UPDATE sessions
-		SET last_used_at = NOW(),
-		    idle_expires_at = LEAST(NOW() + INTERVAL '30 minutes', absolute_expires_at)
-		WHERE token_hash = $1
-	`, tokenHash)
+	rotatedToken := ""
+	if currentTokenHash == tokenHash && time.Since(rotatedAt) >= sessionRotationInterval {
+		rotatedToken, err = newSessionToken()
+		if err != nil {
+			return User{}, "", time.Time{}, err
+		}
+		_, err = tx.ExecContext(ctx, `
+			UPDATE sessions
+			SET previous_token_hash = token_hash,
+			    previous_token_expires_at = NOW() + INTERVAL '30 seconds',
+			    token_hash = $2,
+			    rotated_at = NOW(),
+			    last_used_at = NOW(),
+			    idle_expires_at = LEAST(NOW() + INTERVAL '30 minutes', absolute_expires_at)
+			WHERE id = $1`, sessionID, hashToken(rotatedToken))
+	} else {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE sessions
+			SET last_used_at = NOW(),
+			    idle_expires_at = LEAST(NOW() + INTERVAL '30 minutes', absolute_expires_at)
+			WHERE id = $1`, sessionID)
+	}
+	if err != nil {
+		return User{}, "", time.Time{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, "", time.Time{}, err
+	}
+	return user, rotatedToken, absoluteExpiresAt, nil
+}
+
+func (s *Service) UserBySession(ctx context.Context, token string) (User, error) {
+	user, _, _, err := s.AuthenticateSession(ctx, token)
 	return user, err
 }
 
@@ -271,9 +320,18 @@ func roleForAdminFlag(isAdmin bool) Role {
 
 func (s *Service) RevokeSession(ctx context.Context, token string) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE sessions SET revoked_at = NOW() WHERE token_hash = $1
+		UPDATE sessions SET revoked_at = NOW()
+		WHERE token_hash = $1 OR previous_token_hash = $1
 	`, hashToken(token))
 	return err
+}
+
+func newSessionToken() (string, error) {
+	randomBytes := make([]byte, 32)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(randomBytes), nil
 }
 
 func hashToken(token string) string {

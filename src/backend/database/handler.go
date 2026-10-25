@@ -29,7 +29,7 @@ func NewHandler(registry *RegistryService, catalog *CatalogService, authorizer A
 }
 
 func (h *Handler) DatabasePage(w http.ResponseWriter, r *http.Request) {
-	if err := h.templates.ExecuteTemplate(w, "databases.html", nil); err != nil {
+	if err := h.templates.ExecuteTemplate(w, "databases.html", map[string]string{"CSRFToken": auth.CSRFTokenFromRequest(r)}); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }

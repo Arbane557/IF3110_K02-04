@@ -11,7 +11,7 @@
         <nav class="topbar">
             <a href="/databases">Databases</a><a href="/migrations">Migrations</a>
             <a href="/auth">Users</a><a href="/groups">Groups</a>
-            <form method="post" action="/logout"><button type="submit">Logout</button></form>
+            <form method="post" action="/logout"><input type="hidden" name="_csrf" value="{{.CSRFToken}}"><button type="submit">Logout</button></form>
         </nav>
         <p><a href="/groups">Back to groups</a></p>
         <h1 id="group-name">Group</h1>
@@ -38,8 +38,11 @@
     </main>
     <script>
         const groupId = location.pathname.split("/").pop();
-        async function requestJSON(url, options) {
-            const response = await fetch(url, options);
+        async function requestJSON(url, options = {}) {
+            const method = (options.method || "GET").toUpperCase();
+            const headers = new Headers(options.headers || {});
+            if (!["GET", "HEAD", "OPTIONS"].includes(method)) headers.set("X-CSRF-Token", document.querySelector('input[name="_csrf"]').value);
+            const response = await fetch(url, { ...options, method, headers });
             const payload = response.status === 204 ? null : await response.json();
             if (!response.ok) throw new Error(payload?.error || `Request failed (${response.status})`);
             return payload;

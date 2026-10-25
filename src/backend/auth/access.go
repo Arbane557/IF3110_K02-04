@@ -38,7 +38,9 @@ func (s *AccessService) PrincipalFromRequest(r *http.Request) (Principal, error)
 	err = s.db.QueryRowContext(r.Context(), `
 		SELECT u.id, u.is_admin
 		FROM sessions s JOIN users u ON u.id = s.user_id
-		WHERE s.token_hash = $1 AND s.revoked_at IS NULL
+		WHERE (s.token_hash = $1 OR
+		       (s.previous_token_hash = $1 AND s.previous_token_expires_at > NOW()))
+		  AND s.revoked_at IS NULL
 		  AND s.idle_expires_at > NOW() AND s.absolute_expires_at > NOW()
 	`, hex.EncodeToString(hash[:])).Scan(&principal.UserID, &principal.IsPlatformAdmin)
 	if errors.Is(err, sql.ErrNoRows) {

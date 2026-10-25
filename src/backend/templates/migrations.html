@@ -13,7 +13,7 @@
             <a href="/migrations">Migrations</a>
             <a id="users-link" href="/auth" hidden>Users</a>
             <a id="groups-link" href="/groups" hidden>Groups</a>
-            <form method="post" action="/logout"><button type="submit">Logout</button></form>
+            <form method="post" action="/logout"><input type="hidden" name="_csrf" value="{{.CSRFToken}}"><button type="submit">Logout</button></form>
         </nav>
 
         <h1>Migrations</h1>
@@ -67,8 +67,11 @@
         let currentStatus = "";
         let migrations = [];
 
-        async function requestJSON(url, options) {
-            const response = await fetch(url, options);
+        async function requestJSON(url, options = {}) {
+            const method = (options.method || "GET").toUpperCase();
+            const headers = new Headers(options.headers || {});
+            if (!["GET", "HEAD", "OPTIONS"].includes(method)) headers.set("X-CSRF-Token", document.querySelector('input[name="_csrf"]').value);
+            const response = await fetch(url, { ...options, method, headers });
             const payload = response.status === 204 ? null : await response.json();
             if (!response.ok) throw new Error(payload?.error || `Request failed (${response.status})`);
             return payload;

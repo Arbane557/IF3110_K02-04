@@ -16,6 +16,7 @@
         {{end}}
 
         <form method="post" action="/login">
+            <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
             <label>
                 Username
                 <input name="username" autocomplete="username" required>

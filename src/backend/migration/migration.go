@@ -3,6 +3,8 @@ package migration
 import (
 	"html/template"
 	"net/http"
+
+	"wbd/backend/auth"
 )
 
 // Handler serves migration pages and migration API requests.
@@ -17,7 +19,7 @@ func NewHandler(templates *template.Template, service *Service, authorizer Autho
 }
 
 func (h *Handler) MigrationPage(w http.ResponseWriter, r *http.Request) {
-	if err := h.templates.ExecuteTemplate(w, "migrations.html", nil); err != nil {
+	if err := h.templates.ExecuteTemplate(w, "migrations.html", map[string]string{"CSRFToken": auth.CSRFTokenFromRequest(r)}); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }
