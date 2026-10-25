@@ -54,20 +54,15 @@
         </section>
 
         <section id="viewer-section" hidden>
-            <h2>Schema viewer</h2>
-            <p id="selected-database" class="status"></p>
-            <div class="viewer-grid">
-                <div>
-                    <h3>Schemas</h3>
-                    <p id="schema-status" class="status" role="status"></p>
-                    <ul id="schema-list" class="resource-list"></ul>
-                </div>
-                <div>
-                    <h3 id="tables-heading">Tables</h3>
-                    <p id="table-status" class="status" role="status"></p>
-                    <ul id="table-list" class="resource-list"></ul>
-                </div>
+            <div class="viewer-heading">
+                <div><h2>Schema graph</h2><p id="selected-database" class="status"></p></div>
+                <label>Schema<select id="schema-select" disabled><option>Choose a database</option></select></label>
             </div>
+            <p id="graph-status" class="status" role="status" aria-live="polite"></p>
+            <div class="schema-graph-viewport"><div id="schema-graph" class="schema-graph">
+                <svg id="graph-lines" aria-hidden="true"></svg>
+                <div id="graph-nodes"></div>
+            </div></div>
 
             <div id="table-details" hidden>
                 <h3 id="table-heading">Table details</h3>
@@ -101,11 +96,11 @@
         const databaseList = document.querySelector("#database-list");
         const viewerSection = document.querySelector("#viewer-section");
         const selectedDatabase = document.querySelector("#selected-database");
-        const schemaStatus = document.querySelector("#schema-status");
-        const schemaList = document.querySelector("#schema-list");
-        const tableStatus = document.querySelector("#table-status");
-        const tableList = document.querySelector("#table-list");
-        const tablesHeading = document.querySelector("#tables-heading");
+        const schemaSelect = document.querySelector("#schema-select");
+        const graphStatus = document.querySelector("#graph-status");
+        const schemaGraph = document.querySelector("#schema-graph");
+        const graphLines = document.querySelector("#graph-lines");
+        const graphNodes = document.querySelector("#graph-nodes");
         const detailsSection = document.querySelector("#table-details");
         const tableHeading = document.querySelector("#table-heading");
         const columnList = document.querySelector("#column-list");
@@ -171,13 +166,12 @@
                             }
                         });
                         action.append(button);
-                    } else {
-                        const button = document.createElement("button");
-                        button.type = "button";
-                        button.textContent = "Browse schema";
-                        button.addEventListener("click", () => openViewer(database));
-                        action.append(button);
                     }
+                    const browse = document.createElement("button");
+                    browse.type = "button";
+                    browse.textContent = "Browse schema";
+                    browse.addEventListener("click", () => openViewer(database));
+                    action.append(browse);
                     row.append(name, id, access, action);
                     databaseList.append(row);
                 }
@@ -214,51 +208,175 @@
             currentPage = 1;
             viewerSection.hidden = false;
             selectedDatabase.textContent = `Database: ${database.name}`;
-            schemaList.replaceChildren();
-            tableList.replaceChildren();
+            schemaSelect.replaceChildren(new Option("Loading schemas...", ""));
+            schemaSelect.disabled = true;
+            graphNodes.replaceChildren();
+            graphLines.replaceChildren();
             detailsSection.hidden = true;
-            tablesHeading.textContent = "Tables";
-            schemaStatus.textContent = "Loading schemas...";
-            tableStatus.textContent = "Choose a schema.";
+            graphStatus.textContent = "Loading schemas...";
             try {
                 const schemas = await requestJSON(`/api/databases/${database.id}/schemas`);
-                schemaStatus.textContent = schemas.length ? "" : "No visible schemas.";
+                schemaSelect.replaceChildren();
                 for (const schema of schemas) {
-                    const item = document.createElement("li");
-                    const button = document.createElement("button");
-                    button.type = "button";
-                    button.textContent = schema.name;
-                    button.addEventListener("click", () => loadTables(schema.name));
-                    item.append(button);
-                    schemaList.append(item);
+                    schemaSelect.add(new Option(schema.name, schema.name));
                 }
+                schemaSelect.disabled = schemas.length === 0;
+                if (!schemas.length) {
+                    schemaSelect.add(new Option("No schemas", ""));
+                    graphStatus.textContent = "No visible schemas.";
+                    return;
+                }
+                schemaSelect.value = schemas[0].name;
+                await loadSchemaGraph(schemaSelect.value);
             } catch (error) {
-                schemaStatus.textContent = error.message;
+                graphStatus.textContent = error.message;
             }
         }
 
-        async function loadTables(schema) {
+        schemaSelect.addEventListener("change", () => loadSchemaGraph(schemaSelect.value));
+
+        async function loadSchemaGraph(schema) {
             selectedSchema = schema;
             selectedTable = null;
             detailsSection.hidden = true;
-            tableList.replaceChildren();
-            tablesHeading.textContent = `Tables in ${schema}`;
-            tableStatus.textContent = "Loading tables...";
+            graphNodes.replaceChildren();
+            graphLines.replaceChildren();
+            graphStatus.textContent = "Loading table relationships...";
             try {
                 const tables = await requestJSON(`/api/databases/${selected.id}/schemas/${encodeURIComponent(schema)}/tables`);
-                tableStatus.textContent = tables.length ? "" : "No tables in this schema.";
-                for (const table of tables) {
-                    const item = document.createElement("li");
-                    const button = document.createElement("button");
-                    button.type = "button";
-                    button.textContent = `${table.name} (${table.type})`;
-                    button.addEventListener("click", () => loadTableDetails(table.name));
-                    item.append(button);
-                    tableList.append(item);
+                if (!tables.length) {
+                    graphStatus.textContent = "No tables in this schema.";
+                    schemaGraph.style.width = "100%";
+                    schemaGraph.style.height = "120px";
+                    return;
                 }
+                const nodes = await Promise.all(tables.map(async table => ({
+                    ...table,
+                    details: await requestJSON(`/api/databases/${selected.id}/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table.name)}`),
+                })));
+                renderSchemaGraph(nodes);
+                graphStatus.textContent = "";
             } catch (error) {
-                tableStatus.textContent = error.message;
+                graphStatus.textContent = error.message;
             }
+        }
+
+        function renderSchemaGraph(nodes) {
+            graphNodes.replaceChildren();
+            graphLines.replaceChildren();
+            const byName = new Map(nodes.map(node => [node.name, node]));
+            const edges = [];
+            for (const node of nodes) {
+                for (const constraint of node.details.constraints || []) {
+                    if (constraint.type !== "FOREIGN KEY") continue;
+                    const target = parseForeignKeyTarget(constraint.definition, selectedSchema);
+                    if (target && target.schema === selectedSchema && byName.has(target.table)) {
+                        edges.push({ from: target.table, to: node.name, label: constraint.name });
+                    }
+                }
+            }
+
+            const ranks = new Map(nodes.map(node => [node.name, 0]));
+            for (let pass = 0; pass < nodes.length; pass++) {
+                let changed = false;
+                for (const edge of edges) {
+                    const rank = Math.min(nodes.length - 1, ranks.get(edge.from) + 1);
+                    if (rank > ranks.get(edge.to)) { ranks.set(edge.to, rank); changed = true; }
+                }
+                if (!changed) break;
+            }
+            const columns = new Map();
+            for (const node of nodes) {
+                const rank = ranks.get(node.name);
+                if (!columns.has(rank)) columns.set(rank, []);
+                columns.get(rank).push(node);
+            }
+            const cardWidth = 300, gapX = 150, gapY = 30, pad = 28;
+            const positions = new Map();
+            let graphHeight = 0;
+            let graphWidth;
+            if (edges.length === 0) {
+                const gridColumns = Math.min(3, nodes.length);
+                const rowHeights = [];
+                nodes.sort((a, b) => a.name.localeCompare(b.name));
+                nodes.forEach((node, index) => {
+                    const row = Math.floor(index / gridColumns);
+                    const height = 48 + Math.max(1, node.details.columns.length) * 27;
+                    const y = pad + rowHeights.slice(0, row).reduce((sum, value) => sum + value + gapY, 0);
+                    positions.set(node.name, { x: pad + (index % gridColumns) * (cardWidth + gapX), y, height });
+                    rowHeights[row] = Math.max(rowHeights[row] || 0, height);
+                });
+                graphHeight = pad * 2 + rowHeights.reduce((sum, value) => sum + value + gapY, -gapY);
+                graphWidth = pad * 2 + gridColumns * cardWidth + (gridColumns - 1) * gapX;
+            } else {
+                for (const [rank, column] of columns) {
+                    column.sort((a, b) => a.name.localeCompare(b.name));
+                    let y = pad;
+                    for (const node of column) {
+                        const height = 48 + Math.max(1, node.details.columns.length) * 27;
+                        positions.set(node.name, { x: pad + rank * (cardWidth + gapX), y, height });
+                        y += height + gapY;
+                    }
+                    graphHeight = Math.max(graphHeight, y);
+                }
+                graphWidth = pad * 2 + (Math.max(...columns.keys()) + 1) * (cardWidth + gapX) - gapX;
+            }
+            schemaGraph.style.width = `${Math.max(graphWidth, 700)}px`;
+            schemaGraph.style.height = `${Math.max(graphHeight, 240)}px`;
+
+            for (const node of nodes) {
+                const position = positions.get(node.name);
+                const card = document.createElement("button");
+                card.type = "button";
+                card.className = "schema-node";
+                card.style.left = `${position.x}px`;
+                card.style.top = `${position.y}px`;
+                card.style.width = `${cardWidth}px`;
+                card.addEventListener("click", () => loadTableDetails(node.name));
+                const title = document.createElement("span");
+                title.className = "schema-node-title";
+                title.innerHTML = `<span>${escapeHTML(node.name)}</span><small>${escapeHTML(node.type.replaceAll("_", " "))}</small>`;
+                card.append(title);
+                for (const column of node.details.columns) {
+                    const row = document.createElement("span");
+                    row.className = "schema-node-column";
+                    row.innerHTML = `<span>${escapeHTML(column.name)}</span><small>${escapeHTML(column.dataType)}</small>`;
+                    card.append(row);
+                }
+                graphNodes.append(card);
+            }
+            const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+            const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+            marker.setAttribute("id", "graph-arrow"); marker.setAttribute("viewBox", "0 0 10 10");
+            marker.setAttribute("refX", "9"); marker.setAttribute("refY", "5"); marker.setAttribute("markerWidth", "7"); marker.setAttribute("markerHeight", "7"); marker.setAttribute("orient", "auto-start-reverse");
+            const arrow = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z"); arrow.setAttribute("fill", "#777");
+            marker.append(arrow); defs.append(marker); graphLines.append(defs);
+            graphLines.setAttribute("width", graphWidth); graphLines.setAttribute("height", graphHeight);
+            graphLines.setAttribute("viewBox", `0 0 ${graphWidth} ${graphHeight}`);
+            for (const edge of edges) {
+                const source = positions.get(edge.from), target = positions.get(edge.to);
+                const x1 = source.x + cardWidth, y1 = source.y + source.height / 2;
+                const x2 = target.x, y2 = target.y + target.height / 2;
+                const bend = Math.max(55, Math.abs(x2 - x1) / 2);
+                const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+                path.setAttribute("d", `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`);
+                path.setAttribute("class", "schema-edge"); path.setAttribute("marker-end", "url(#graph-arrow)");
+                path.setAttribute("aria-label", edge.label); graphLines.append(path);
+            }
+        }
+
+        function escapeHTML(value) {
+            return String(value).replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
+        }
+
+        function parseForeignKeyTarget(definition, defaultSchema) {
+            const match = definition.match(/\bREFERENCES\s+(?:(?:"([^"]+)"|([\w$]+))\.)?(?:"([^"]+)"|([\w$]+))/i);
+            if (!match) return null;
+            return {
+                schema: match[1] || match[2] || defaultSchema,
+                table: (match[3] || match[4]).replaceAll('""', '"'),
+            };
         }
 
         async function loadTableDetails(table) {
@@ -270,9 +388,11 @@
             constraintList.replaceChildren();
             indexList.replaceChildren();
             rowStatus.textContent = "Loading table details...";
+            rowHead.replaceChildren();
+            rowList.replaceChildren();
+            const base = `/api/databases/${selected.id}/schemas/${encodeURIComponent(selectedSchema)}/tables/${encodeURIComponent(table)}`;
             try {
-                const base = `/api/databases/${selected.id}/schemas/${encodeURIComponent(selectedSchema)}/tables/${encodeURIComponent(table)}`;
-                const [details] = await Promise.all([requestJSON(base), loadRows(base)]);
+                const details = await requestJSON(base);
                 for (const column of details.columns) {
                     const row = document.createElement("tr");
                     for (const value of [column.name, column.dataType, column.nullable ? "yes" : "no", column.default ?? ""]) {
@@ -284,9 +404,17 @@
                 }
                 renderDefinitionList(constraintList, details.constraints, value => `${value.name}: ${value.type} - ${value.definition}`);
                 renderDefinitionList(indexList, details.indexes, value => `${value.name}: ${value.definition}`);
-                rowStatus.textContent = "";
             } catch (error) {
                 rowStatus.textContent = error.message;
+                return;
+            }
+            try {
+                await loadRows(base);
+                rowStatus.textContent = "";
+            } catch (error) {
+                rowStatus.textContent = error.message === "Failed to fetch"
+                    ? "Could not load table rows. Check the backend and database connection."
+                    : error.message;
             }
         }
 
