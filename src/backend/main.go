@@ -65,7 +65,7 @@ func main() {
 	migrationService := migration.NewService(connectionManager)
 
 	app := &App{
-		Auth:      auth.NewHandler(auth.NewService(internalDB), templates),
+		Auth:      auth.NewHandler(auth.NewService(internalDB, protector), templates),
 		Database:  database.NewHandler(registry, catalog, access, templates),
 		Migration: migration.NewHandler(templates, migrationService, access),
 	}

@@ -12,6 +12,11 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+type testTokenProtector struct{}
+
+func (testTokenProtector) Seal(token string) ([]byte, error) { return []byte(token), nil }
+func (testTokenProtector) Open(token []byte) (string, error) { return string(token), nil }
+
 func TestRequireCSRFRejectsMissingAndMismatchedTokens(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -68,7 +73,7 @@ func TestAuthenticateSessionRotatesWithGracePeriod(t *testing.T) {
 	for _, statement := range []string{
 		`CREATE TEMP TABLE users (id BIGINT PRIMARY KEY, username TEXT NOT NULL, is_admin BOOLEAN NOT NULL)`,
 		`CREATE TEMP TABLE sessions (
-			id BIGSERIAL PRIMARY KEY, token_hash CHAR(64) NOT NULL UNIQUE,
+			id BIGSERIAL PRIMARY KEY, token_hash CHAR(64) NOT NULL UNIQUE, current_token_ciphertext BYTEA NOT NULL,
 			previous_token_hash CHAR(64), previous_token_expires_at TIMESTAMPTZ,
 			user_id BIGINT NOT NULL REFERENCES users(id), idle_expires_at TIMESTAMPTZ NOT NULL,
 			absolute_expires_at TIMESTAMPTZ NOT NULL, last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -82,7 +87,7 @@ func TestAuthenticateSessionRotatesWithGracePeriod(t *testing.T) {
 		}
 	}
 
-	service := NewService(db)
+	service := NewService(db, testTokenProtector{})
 	initialToken, expiresAt, err := service.CreateSession(context.Background(), User{ID: 1})
 	if err != nil {
 		t.Fatalf("create session: %v", err)

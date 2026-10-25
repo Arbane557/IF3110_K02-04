@@ -35,11 +35,11 @@ func (s *Service) List(ctx context.Context, databaseID database.DatabaseID) ([]M
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureTable(ctx, pool); err != nil {
-		return nil, database.ErrDatabaseUnavailable
-	}
 	rows, err := pool.Query(ctx, migrationSelect+` ORDER BY version`)
 	if err != nil {
+		if isMissingMigrationTable(err) {
+			return []Migration{}, nil
+		}
 		return nil, database.ErrDatabaseUnavailable
 	}
 	defer rows.Close()
@@ -62,11 +62,8 @@ func (s *Service) Get(ctx context.Context, databaseID database.DatabaseID, versi
 	if err != nil {
 		return Migration{}, err
 	}
-	if err := ensureTable(ctx, pool); err != nil {
-		return Migration{}, database.ErrDatabaseUnavailable
-	}
 	item, err := scanMigration(pool.QueryRow(ctx, migrationSelect+` WHERE version = $1`, version))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || isMissingMigrationTable(err) {
 		return Migration{}, ErrMigrationNotFound
 	}
 	return item, err
@@ -116,12 +113,9 @@ func (s *Service) Update(ctx context.Context, databaseID database.DatabaseID, ve
 	if err != nil {
 		return Migration{}, err
 	}
-	if err := ensureTable(ctx, pool); err != nil {
-		return Migration{}, database.ErrDatabaseUnavailable
-	}
 	var item Migration
 	item, err = scanMigration(pool.QueryRow(ctx, migrationSelect+` WHERE version = $1`, version))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || isMissingMigrationTable(err) {
 		return Migration{}, ErrMigrationNotFound
 	}
 	if err != nil {
@@ -176,17 +170,13 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	if err != nil {
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
-	if err := ensureTable(ctx, tx); err != nil {
-		tx.Rollback(ctx)
-		return Migration{}, database.ErrDatabaseUnavailable
-	}
 	if err := lockMigrations(ctx, tx); err != nil {
 		tx.Rollback(ctx)
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
 	var item Migration
 	item, err = scanMigration(tx.QueryRow(ctx, migrationSelect+` WHERE version = $1 FOR UPDATE`, version))
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || isMissingMigrationTable(err) {
 		tx.Rollback(ctx)
 		return Migration{}, ErrMigrationNotFound
 	}
@@ -273,6 +263,11 @@ func ensureTable(ctx context.Context, executor interface {
 			error_message TEXT
 		)`)
 	return err
+}
+
+func isMissingMigrationTable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
 }
 
 func lockMigrations(ctx context.Context, tx pgx.Tx) error {

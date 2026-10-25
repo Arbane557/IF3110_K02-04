@@ -63,11 +63,17 @@ type GroupDetails struct {
 
 // Service handles account lookup and server-side session persistence.
 type Service struct {
-	db *sql.DB
+	db              *sql.DB
+	tokenProtector  SessionTokenProtector
 }
 
-func NewService(db *sql.DB) *Service {
-	return &Service{db: db}
+type SessionTokenProtector interface {
+	Seal(string) ([]byte, error)
+	Open([]byte) (string, error)
+}
+
+func NewService(db *sql.DB, tokenProtector SessionTokenProtector) *Service {
+	return &Service{db: db, tokenProtector: tokenProtector}
 }
 
 func (s *Service) FindUserByUsername(ctx context.Context, username string) (User, string, error) {
@@ -337,12 +343,16 @@ func (s *Service) CreateSession(ctx context.Context, user User) (string, time.Ti
 	if err != nil {
 		return "", time.Time{}, err
 	}
+	ciphertext, err := s.tokenProtector.Seal(token)
+	if err != nil {
+		return "", time.Time{}, err
+	}
 	now := time.Now()
 	expiresAt := now.Add(sessionAbsoluteTimeout).Truncate(time.Microsecond)
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO sessions (token_hash, user_id, idle_expires_at, absolute_expires_at)
-		VALUES ($1, $2, $3, $4)
-	`, hashToken(token), user.ID, now.Add(sessionIdleTimeout), expiresAt)
+		INSERT INTO sessions (token_hash, current_token_ciphertext, user_id, idle_expires_at, absolute_expires_at)
+		VALUES ($1, $2, $3, $4, $5)
+	`, hashToken(token), ciphertext, user.ID, now.Add(sessionIdleTimeout), expiresAt)
 	return token, expiresAt, err
 }
 
@@ -357,12 +367,13 @@ func (s *Service) AuthenticateSession(ctx context.Context, token string) (User, 
 	var isAdmin bool
 	var sessionID int64
 	var currentTokenHash string
+	var currentTokenCiphertext []byte
 	var rotatedAt time.Time
 	var rotationRequired bool
 	var absoluteExpiresAt time.Time
 	tokenHash := hashToken(token)
 	err = tx.QueryRowContext(ctx, `
-		SELECT s.id, s.token_hash, s.rotated_at, s.rotation_required, s.absolute_expires_at,
+		SELECT s.id, s.token_hash, s.current_token_ciphertext, s.rotated_at, s.rotation_required, s.absolute_expires_at,
 		       u.id, u.username, u.is_admin
 		FROM sessions s
 		JOIN users u ON u.id = s.user_id
@@ -372,7 +383,7 @@ func (s *Service) AuthenticateSession(ctx context.Context, token string) (User, 
 		  AND s.idle_expires_at > NOW()
 		  AND s.absolute_expires_at > NOW()
 		FOR UPDATE OF s
-	`, tokenHash).Scan(&sessionID, &currentTokenHash, &rotatedAt, &rotationRequired, &absoluteExpiresAt,
+	`, tokenHash).Scan(&sessionID, &currentTokenHash, &currentTokenCiphertext, &rotatedAt, &rotationRequired, &absoluteExpiresAt,
 		&user.ID, &user.Username, &isAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, "", time.Time{}, ErrInvalidSession
@@ -388,17 +399,28 @@ func (s *Service) AuthenticateSession(ctx context.Context, token string) (User, 
 		if err != nil {
 			return User{}, "", time.Time{}, err
 		}
+		ciphertext, err := s.tokenProtector.Seal(rotatedToken)
+		if err != nil {
+			return User{}, "", time.Time{}, err
+		}
 		_, err = tx.ExecContext(ctx, `
 			UPDATE sessions
 			SET previous_token_hash = token_hash,
 			    previous_token_expires_at = NOW() + INTERVAL '30 seconds',
 			    token_hash = $2,
+			    current_token_ciphertext = $3,
 			    rotated_at = NOW(),
 			    rotation_required = FALSE,
 			    last_used_at = NOW(),
 			    idle_expires_at = LEAST(NOW() + INTERVAL '30 minutes', absolute_expires_at)
-			WHERE id = $1`, sessionID, hashToken(rotatedToken))
+			WHERE id = $1`, sessionID, hashToken(rotatedToken), ciphertext)
 	} else {
+		if currentTokenHash != tokenHash {
+			rotatedToken, err = s.tokenProtector.Open(currentTokenCiphertext)
+			if err != nil {
+				return User{}, "", time.Time{}, err
+			}
+		}
 		_, err = tx.ExecContext(ctx, `
 			UPDATE sessions
 			SET last_used_at = NOW(),

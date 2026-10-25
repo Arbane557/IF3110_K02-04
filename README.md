@@ -56,6 +56,23 @@ docker compose up --build
 
 Buka aplikasi pada [http://localhost:6969](http://localhost:6969).
 
+### DB Seeding Admin
+
+
+```bash
+docker compose exec -T database psql -U app -d app <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+INSERT INTO users (username, password_hash, is_admin)
+VALUES ('admin', crypt('admin1234', gen_salt('bf', 12)), TRUE)
+ON CONFLICT (username) DO UPDATE
+SET password_hash = EXCLUDED.password_hash,
+    is_admin = TRUE;
+SQL
+```
+
+Login dengan username `admin` dan password yang kamu masukkan. Setelah login, akun lain bisa dibuat dari halaman Users.
+
 | Service | Fungsi | Port host |
 | --- | --- | --- |
 | `backend` | Aplikasi Go | `6969` |
