@@ -188,6 +188,30 @@ func (h *Handler) RegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := h.service.ListUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load users")
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+func (h *Handler) MakeUserAdmin(w http.ResponseWriter, r *http.Request) {
+	userID, ok := positivePathID(w, r, "userID")
+	if !ok {
+		return
+	}
+	user, err := h.service.MakeUserAdmin(r.Context(), userID)
+	if errors.Is(err, ErrUserNotFound) {
+		writeError(w, http.StatusNotFound, "user not found")
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not make user admin")
+	} else {
+		writeJSON(w, http.StatusOK, user)
+	}
+}
+
 func (h *Handler) UsersPage(w http.ResponseWriter, r *http.Request) {
 	h.renderTemplate(w, "users.html", map[string]string{"CSRFToken": CSRFTokenFromRequest(r)})
 }

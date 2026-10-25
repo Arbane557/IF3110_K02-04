@@ -16,6 +16,7 @@ CREATE TABLE sessions (
     absolute_expires_at TIMESTAMPTZ NOT NULL,
     last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    rotation_required BOOLEAN NOT NULL DEFAULT FALSE,
     revoked_at TIMESTAMPTZ
 );
 

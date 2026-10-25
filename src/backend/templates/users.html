@@ -25,28 +25,90 @@
             </form>
             <p id="register-status" class="status" role="status" aria-live="polite"></p>
         </section>
+        <section>
+            <h2>Users</h2>
+            <p id="users-status" class="status" role="status" aria-live="polite">Loading users...</p>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>Username</th><th>Role</th><th>Action</th></tr></thead>
+                    <tbody id="users-list"></tbody>
+                </table>
+            </div>
+        </section>
     </main>
     <script>
         const form = document.querySelector("#register-form");
         const status = document.querySelector("#register-status");
+        const usersStatus = document.querySelector("#users-status");
+        const usersList = document.querySelector("#users-list");
+        const csrfToken = document.querySelector('input[name="_csrf"]').value;
+
+        async function requestJSON(url, options = {}) {
+            const response = await fetch(url, {
+                ...options,
+                headers: { ...(options.headers || {}), "X-CSRF-Token": csrfToken },
+            });
+            const payload = response.status === 204 ? null : await response.json();
+            if (!response.ok) throw new Error(payload?.error || `Request failed (${response.status})`);
+            return payload;
+        }
+
+        async function loadUsers() {
+            try {
+                const users = await requestJSON("/api/auth/users");
+                usersList.replaceChildren();
+                usersStatus.textContent = users.length ? "" : "No users yet.";
+                for (const user of users) {
+                    const row = document.createElement("tr");
+                    const username = document.createElement("td");
+                    const role = document.createElement("td");
+                    const action = document.createElement("td");
+                    username.textContent = user.username;
+                    role.textContent = user.role;
+                    if (user.role !== "ADMIN") {
+                        const button = document.createElement("button");
+                        button.type = "button";
+                        button.textContent = "Make admin";
+                        button.addEventListener("click", async () => {
+                            button.disabled = true;
+                            try {
+                                await requestJSON(`/api/auth/users/${user.id}/admin`, { method: "PUT" });
+                                await loadUsers();
+                                usersStatus.textContent = `${user.username} is now an admin. Their active sessions will rotate on their next request.`;
+                            } catch (error) {
+                                usersStatus.textContent = error.message;
+                                button.disabled = false;
+                            }
+                        });
+                        action.append(button);
+                    } else {
+                        action.textContent = "—";
+                    }
+                    row.append(username, role, action);
+                    usersList.append(row);
+                }
+            } catch (error) {
+                usersStatus.textContent = error.message;
+            }
+        }
+
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
             status.textContent = "Creating user…";
             const values = Object.fromEntries(new FormData(form));
             try {
-                const response = await fetch("/api/auth/register", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json", "X-CSRF-Token": document.querySelector('input[name="_csrf"]').value },
-                    body: JSON.stringify(values),
+                const result = await requestJSON("/api/auth/register", {
+                    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
                 });
-                const result = await response.json();
-                if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
                 form.reset();
                 status.textContent = `Created user ${result.username}.`;
+                await loadUsers();
             } catch (error) {
                 status.textContent = error.message;
             }
         });
+
+        loadUsers();
     </script>
 </body>
 </html>

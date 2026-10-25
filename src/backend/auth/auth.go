@@ -20,6 +20,7 @@ var (
 	ErrUsernameTaken = errors.New("username already exists")
 	ErrInvalidGroup = errors.New("invalid group")
 	ErrInvalidSession = errors.New("invalid or expired session")
+	ErrUserNotFound = errors.New("user not found")
 )
 
 const (
@@ -107,6 +108,46 @@ func (s *Service) CreateUser(ctx context.Context, username, password string) (Us
 		return User{}, ErrUsernameTaken
 	}
 	return user, err
+}
+
+func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
+	return s.groupUsers(ctx, `SELECT id, username, is_admin FROM users ORDER BY username`)
+}
+
+func (s *Service) MakeUserAdmin(ctx context.Context, userID int64) (User, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, err
+	}
+	defer tx.Rollback()
+
+	var user User
+	var isAdmin bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, username, is_admin FROM users WHERE id = $1 FOR UPDATE`, userID).
+		Scan(&user.ID, &user.Username, &isAdmin)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrUserNotFound
+	}
+	if err != nil {
+		return User{}, err
+	}
+	user.Role = roleForAdminFlag(isAdmin)
+	if !isAdmin {
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET is_admin = TRUE WHERE id = $1`, userID); err != nil {
+			return User{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE sessions SET rotation_required = TRUE
+			WHERE user_id = $1 AND revoked_at IS NULL`, userID); err != nil {
+			return User{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, err
+	}
+	user.Role = RoleAdmin
+	return user, nil
 }
 
 func (s *Service) ListGroups(ctx context.Context) ([]Group, error) {
@@ -204,25 +245,90 @@ func (s *Service) AddGroupMember(ctx context.Context, groupID, userID int64) err
 }
 
 func (s *Service) RemoveGroupMember(ctx context.Context, groupID, userID int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM group_members WHERE group_id = $1 AND user_id = $2`, groupID, userID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `DELETE FROM group_members WHERE group_id = $1 AND user_id = $2`, groupID, userID)
+	if err != nil {
+		return err
+	}
+	if removed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if removed > 0 {
+		if err := revokeUserSessions(ctx, tx, userID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Service) SetGroupDatabaseAccess(ctx context.Context, groupID, databaseID int64, level string) error {
 	if level != "view" && level != "edit" {
 		return ErrInvalidGroup
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var oldLevel string
+	err = tx.QueryRowContext(ctx, `
+		SELECT access_level FROM group_database_permissions
+		WHERE group_id = $1 AND database_id = $2 FOR UPDATE`, groupID, databaseID).Scan(&oldLevel)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO group_database_permissions (group_id, database_id, access_level)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (group_id, database_id)
 		DO UPDATE SET access_level = EXCLUDED.access_level`, groupID, databaseID, level)
-	return err
+	if err != nil {
+		return err
+	}
+	if oldLevel == "edit" && level == "view" {
+		if err := revokeGroupSessions(ctx, tx, groupID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Service) RemoveGroupDatabaseAccess(ctx context.Context, groupID, databaseID int64) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
 		DELETE FROM group_database_permissions WHERE group_id = $1 AND database_id = $2`, groupID, databaseID)
+	if err != nil {
+		return err
+	}
+	if removed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if removed > 0 {
+		if err := revokeGroupSessions(ctx, tx, groupID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func revokeUserSessions(ctx context.Context, tx *sql.Tx, userID int64) error {
+	_, err := tx.ExecContext(ctx, `UPDATE sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`, userID)
+	return err
+}
+
+func revokeGroupSessions(ctx context.Context, tx *sql.Tx, groupID int64) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE sessions SET revoked_at = NOW()
+		WHERE revoked_at IS NULL AND user_id IN (
+			SELECT user_id FROM group_members WHERE group_id = $1
+		)`, groupID)
 	return err
 }
 
@@ -252,10 +358,11 @@ func (s *Service) AuthenticateSession(ctx context.Context, token string) (User, 
 	var sessionID int64
 	var currentTokenHash string
 	var rotatedAt time.Time
+	var rotationRequired bool
 	var absoluteExpiresAt time.Time
 	tokenHash := hashToken(token)
 	err = tx.QueryRowContext(ctx, `
-		SELECT s.id, s.token_hash, s.rotated_at, s.absolute_expires_at,
+		SELECT s.id, s.token_hash, s.rotated_at, s.rotation_required, s.absolute_expires_at,
 		       u.id, u.username, u.is_admin
 		FROM sessions s
 		JOIN users u ON u.id = s.user_id
@@ -265,7 +372,7 @@ func (s *Service) AuthenticateSession(ctx context.Context, token string) (User, 
 		  AND s.idle_expires_at > NOW()
 		  AND s.absolute_expires_at > NOW()
 		FOR UPDATE OF s
-	`, tokenHash).Scan(&sessionID, &currentTokenHash, &rotatedAt, &absoluteExpiresAt,
+	`, tokenHash).Scan(&sessionID, &currentTokenHash, &rotatedAt, &rotationRequired, &absoluteExpiresAt,
 		&user.ID, &user.Username, &isAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, "", time.Time{}, ErrInvalidSession
@@ -276,7 +383,7 @@ func (s *Service) AuthenticateSession(ctx context.Context, token string) (User, 
 	user.Role = roleForAdminFlag(isAdmin)
 
 	rotatedToken := ""
-	if currentTokenHash == tokenHash && time.Since(rotatedAt) >= sessionRotationInterval {
+	if currentTokenHash == tokenHash && (rotationRequired || time.Since(rotatedAt) >= sessionRotationInterval) {
 		rotatedToken, err = newSessionToken()
 		if err != nil {
 			return User{}, "", time.Time{}, err
@@ -287,6 +394,7 @@ func (s *Service) AuthenticateSession(ctx context.Context, token string) (User, 
 			    previous_token_expires_at = NOW() + INTERVAL '30 seconds',
 			    token_hash = $2,
 			    rotated_at = NOW(),
+			    rotation_required = FALSE,
 			    last_used_at = NOW(),
 			    idle_expires_at = LEAST(NOW() + INTERVAL '30 minutes', absolute_expires_at)
 			WHERE id = $1`, sessionID, hashToken(rotatedToken))

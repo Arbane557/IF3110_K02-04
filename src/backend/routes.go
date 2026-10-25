@@ -35,6 +35,8 @@ func (app *App) registerAuthRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /groups", app.Auth.RequireAuthAdmin(http.HandlerFunc(app.Auth.GroupsPage)))
 	mux.Handle("GET /groups/{groupID}", app.Auth.RequireAuthAdmin(http.HandlerFunc(app.Auth.GroupPage)))
 	mux.Handle("POST /api/auth/register", admin(app.Auth.RegisterUser))
+	mux.Handle("GET /api/auth/users", app.Auth.RequireAuthAdmin(http.HandlerFunc(app.Auth.ListUsers)))
+	mux.Handle("PUT /api/auth/users/{userID}/admin", admin(app.Auth.MakeUserAdmin))
 	mux.Handle("GET /api/auth/groups", app.Auth.RequireAuthAdmin(http.HandlerFunc(app.Auth.ListGroups)))
 	mux.Handle("POST /api/auth/groups", admin(app.Auth.CreateGroup))
 	mux.Handle("GET /api/auth/groups/{groupID}", app.Auth.RequireAuthAdmin(http.HandlerFunc(app.Auth.GetGroup)))

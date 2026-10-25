@@ -72,7 +72,8 @@ func TestAuthenticateSessionRotatesWithGracePeriod(t *testing.T) {
 			previous_token_hash CHAR(64), previous_token_expires_at TIMESTAMPTZ,
 			user_id BIGINT NOT NULL REFERENCES users(id), idle_expires_at TIMESTAMPTZ NOT NULL,
 			absolute_expires_at TIMESTAMPTZ NOT NULL, last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), revoked_at TIMESTAMPTZ
+			rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), rotation_required BOOLEAN NOT NULL DEFAULT FALSE,
+			revoked_at TIMESTAMPTZ
 		)`,
 		`INSERT INTO users (id, username, is_admin) VALUES (1, 'rotation-test', FALSE)`,
 	} {
