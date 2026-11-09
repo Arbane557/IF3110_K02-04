@@ -26,7 +26,7 @@ func (p *failingPools) Pool(context.Context, database.DatabaseID) (*pgxpool.Pool
 
 func TestMigrationServiceRejectsInvalidInputBeforeConnecting(t *testing.T) {
 	pools := &failingPools{err: errors.New("must not connect")}
-	service := NewService(pools)
+	service := NewService(nil, pools)
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name string
@@ -84,7 +84,7 @@ func TestMigrationHandlersCheckResourceAndAction(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			authorizer := &recordingAuthorizer{permissionErr: auth.ErrForbidden}
 			pools := &failingPools{err: errors.New("must not connect")}
-			handler := NewHandler(nil, NewService(pools), authorizer)
+			handler := NewHandler(nil, NewService(nil, pools), authorizer)
 			mux := http.NewServeMux()
 			mux.HandleFunc(tc.method+" "+tc.path, tc.handler(handler))
 			url := strings.ReplaceAll(strings.ReplaceAll(tc.path, "{databaseID}", "42"), "{version}", "1")

@@ -43,7 +43,7 @@ func TestLoginAdminAndCSRFRoutesIntegration(t *testing.T) {
 	app := &App{
 		Auth:      auth.NewHandler(accounts, templates),
 		Database:  database.NewHandler(database.NewRegistryService(repository, connections, protector), database.NewCatalogService(connections), access, templates),
-		Migration: migration.NewHandler(templates, migration.NewService(connections), access),
+		Migration: migration.NewHandler(templates, migration.NewService(fixture.SQL, connections), access),
 	}
 	routes := app.routes()
 	loginPage := httptest.NewRecorder()

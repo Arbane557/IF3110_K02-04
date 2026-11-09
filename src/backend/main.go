@@ -73,7 +73,7 @@ func main() {
 	access := auth.NewAccessService(internalDB)
 	registry := database.NewRegistryService(registryRepository, connectionManager, protector)
 	catalog := database.NewCatalogService(connectionManager)
-	migrationService := migration.NewService(connectionManager, observabilityService)
+	migrationService := migration.NewService(internalDB, connectionManager, observabilityService)
 
 	app := &App{
 		Auth:      auth.NewHandler(auth.NewService(internalDB, protector), templates),

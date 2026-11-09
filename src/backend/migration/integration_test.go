@@ -25,7 +25,7 @@ func (p integrationPool) Pool(context.Context, database.DatabaseID) (*pgxpool.Po
 
 func TestMigrationLifecycleAndHistoryIntegration(t *testing.T) {
 	fixture := testutil.NewDatabase(t, false)
-	service := NewService(integrationPool{fixture.Pool})
+	service := NewService(fixture.SQL, integrationPool{fixture.Pool})
 	ctx := context.Background()
 	empty, err := service.List(ctx, 1)
 	if err != nil || len(empty) != 0 {
@@ -90,7 +90,7 @@ func TestMigrationLifecycleAndHistoryIntegration(t *testing.T) {
 
 func TestMigrationDraftUpdateIntegration(t *testing.T) {
 	fixture := testutil.NewDatabase(t, false)
-	service := NewService(integrationPool{fixture.Pool})
+	service := NewService(fixture.SQL, integrationPool{fixture.Pool})
 	ctx := context.Background()
 	draft, err := service.Create(ctx, 1, 7, "SELECT 1")
 	if err != nil {
@@ -115,7 +115,7 @@ func TestMigrationExplainDoesNotExecuteIntegration(t *testing.T) {
 	if _, err := fixture.Pool.Exec(ctx, `CREATE TABLE items (id INTEGER); INSERT INTO items VALUES (1)`); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(integrationPool{fixture.Pool})
+	service := NewService(fixture.SQL, integrationPool{fixture.Pool})
 	plan, err := service.Explain(ctx, 1, "DELETE FROM items")
 	if err != nil || !strings.Contains(plan, "Delete on items") {
 		t.Fatalf("plan=%q error=%v", plan, err)
@@ -158,7 +158,7 @@ func TestMigrationAccessLevelsIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(integrationPool{fixture.Pool})
+	service := NewService(fixture.SQL, integrationPool{fixture.Pool})
 	handler := NewHandler(nil, service, auth.NewAccessService(fixture.SQL))
 	authHandler := auth.NewHandler(accounts, nil)
 	mux := http.NewServeMux()

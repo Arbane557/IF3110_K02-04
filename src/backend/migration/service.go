@@ -11,7 +11,6 @@ import (
 	"wbd/backend/observability"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,15 +20,17 @@ var (
 	ErrMigrationNotFound = errors.New("migration not found")
 	ErrMigrationLocked   = errors.New("migration cannot be changed")
 	ErrMigrationFailed   = errors.New("migration execution failed")
+	ErrMigrationStore    = errors.New("migration store unavailable")
 )
 
 type Service struct {
-	pools    database.TargetPoolProvider
-	observer observability.Observer
+	pools      database.TargetPoolProvider
+	internalDB *sql.DB
+	observer   observability.Observer
 }
 
-func NewService(pools database.TargetPoolProvider, observers ...observability.Observer) *Service {
-	service := &Service{pools: pools}
+func NewService(internalDB *sql.DB, pools database.TargetPoolProvider, observers ...observability.Observer) *Service {
+	service := &Service{internalDB: internalDB, pools: pools}
 	if len(observers) > 0 {
 		service.observer = observers[0]
 	}
@@ -37,16 +38,12 @@ func NewService(pools database.TargetPoolProvider, observers ...observability.Ob
 }
 
 func (s *Service) List(ctx context.Context, databaseID database.DatabaseID) ([]Migration, error) {
-	pool, err := s.pools.Pool(ctx, databaseID)
-	if err != nil {
-		return nil, err
+	if s.internalDB == nil {
+		return nil, ErrMigrationStore
 	}
-	rows, err := pool.Query(ctx, migrationSelect+` ORDER BY version`)
+	rows, err := s.internalDB.QueryContext(ctx, migrationSelect+` WHERE database_id = $1 ORDER BY version`, databaseID)
 	if err != nil {
-		if isMissingMigrationTable(err) {
-			return []Migration{}, nil
-		}
-		return nil, database.ErrDatabaseUnavailable
+		return nil, ErrMigrationStore
 	}
 	defer rows.Close()
 	result := make([]Migration, 0)
@@ -64,13 +61,16 @@ func (s *Service) Get(ctx context.Context, databaseID database.DatabaseID, versi
 	if version <= 0 {
 		return Migration{}, ErrInvalidVersion
 	}
-	pool, err := s.pools.Pool(ctx, databaseID)
-	if err != nil {
-		return Migration{}, err
+	if s.internalDB == nil {
+		return Migration{}, ErrMigrationStore
 	}
-	item, err := scanMigration(pool.QueryRow(ctx, migrationSelect+` WHERE version = $1`, version))
-	if errors.Is(err, pgx.ErrNoRows) || isMissingMigrationTable(err) {
+	item, err := scanMigration(s.internalDB.QueryRowContext(ctx,
+		migrationSelect+` WHERE database_id = $1 AND version = $2`, databaseID, version))
+	if errors.Is(err, sql.ErrNoRows) {
 		return Migration{}, ErrMigrationNotFound
+	}
+	if err != nil {
+		return Migration{}, ErrMigrationStore
 	}
 	return item, err
 }
@@ -79,31 +79,32 @@ func (s *Service) Create(ctx context.Context, databaseID database.DatabaseID, us
 	if err := validateSQL(sqlText); err != nil {
 		return Migration{}, err
 	}
-	pool, err := s.pools.Pool(ctx, databaseID)
+	if s.internalDB == nil {
+		return Migration{}, ErrMigrationStore
+	}
+	tx, err := s.internalDB.BeginTx(ctx, nil)
 	if err != nil {
-		return Migration{}, err
+		return Migration{}, ErrMigrationStore
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return Migration{}, database.ErrDatabaseUnavailable
-	}
-	defer tx.Rollback(ctx)
-	if err := ensureTable(ctx, tx); err != nil {
-		return Migration{}, database.ErrDatabaseUnavailable
-	}
-	if err := lockMigrations(ctx, tx); err != nil {
-		return Migration{}, database.ErrDatabaseUnavailable
+	defer tx.Rollback()
+	if err := lockInternalMigrations(ctx, tx, databaseID); err != nil {
+		return Migration{}, ErrMigrationStore
 	}
 	var version int64
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM platform_migrations`).Scan(&version); err != nil {
-		return Migration{}, database.ErrDatabaseUnavailable
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(version), 0) + 1 FROM migrations WHERE database_id = $1`,
+		databaseID).Scan(&version); err != nil {
+		return Migration{}, ErrMigrationStore
 	}
-	item, err := insertMigration(ctx, tx, version, sqlText, userID, "draft")
+	item, err := scanMigration(tx.QueryRowContext(ctx, `
+		INSERT INTO migrations (database_id, version, sql_text, created_by, status)
+		VALUES ($1, $2, $3, $4, 'draft')
+		RETURNING `+migrationColumns, databaseID, version, sqlText, userID))
 	if err != nil {
-		return Migration{}, database.ErrDatabaseUnavailable
+		return Migration{}, ErrMigrationStore
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Migration{}, database.ErrDatabaseUnavailable
+	if err := tx.Commit(); err != nil {
+		return Migration{}, ErrMigrationStore
 	}
 	return item, nil
 }
@@ -115,13 +116,13 @@ func (s *Service) Update(ctx context.Context, databaseID database.DatabaseID, ve
 	if err := validateSQL(sqlText); err != nil {
 		return Migration{}, err
 	}
-	pool, err := s.pools.Pool(ctx, databaseID)
-	if err != nil {
-		return Migration{}, err
+	if s.internalDB == nil {
+		return Migration{}, ErrMigrationStore
 	}
 	var item Migration
-	item, err = scanMigration(pool.QueryRow(ctx, migrationSelect+` WHERE version = $1`, version))
-	if errors.Is(err, pgx.ErrNoRows) || isMissingMigrationTable(err) {
+	item, err := scanMigration(s.internalDB.QueryRowContext(ctx,
+		migrationSelect+` WHERE database_id = $1 AND version = $2`, databaseID, version))
+	if errors.Is(err, sql.ErrNoRows) {
 		return Migration{}, ErrMigrationNotFound
 	}
 	if err != nil {
@@ -130,16 +131,16 @@ func (s *Service) Update(ctx context.Context, databaseID database.DatabaseID, ve
 	if item.Status != "draft" {
 		return Migration{}, ErrMigrationLocked
 	}
-	item, err = scanMigration(pool.QueryRow(ctx, `
-		UPDATE platform_migrations
-		SET sql_text = $2
-		WHERE version = $1 AND status = 'draft'
-		RETURNING `+migrationColumns, version, sqlText))
-	if errors.Is(err, pgx.ErrNoRows) {
+	item, err = scanMigration(s.internalDB.QueryRowContext(ctx, `
+		UPDATE migrations
+		SET sql_text = $3
+		WHERE database_id = $1 AND version = $2 AND status = 'draft'
+		RETURNING `+migrationColumns, databaseID, version, sqlText))
+	if errors.Is(err, sql.ErrNoRows) {
 		return Migration{}, ErrMigrationLocked
 	}
 	if err != nil {
-		return Migration{}, database.ErrDatabaseUnavailable
+		return Migration{}, ErrMigrationStore
 	}
 	return item, nil
 }
@@ -184,36 +185,28 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	if version <= 0 || userID <= 0 {
 		return Migration{}, ErrInvalidVersion
 	}
+	if s.internalDB == nil {
+		return Migration{}, ErrMigrationStore
+	}
+	item, err := s.startExecution(ctx, databaseID, version, userID)
+	if err != nil {
+		return Migration{}, err
+	}
 	pool, err := s.pools.Pool(ctx, databaseID)
 	if err != nil {
+		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
 		return Migration{}, err
 	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
+		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
 	s.recordPoolStats(pool)
 	defer s.recordPoolStats(pool)
 	if err := lockMigrations(ctx, tx); err != nil {
 		tx.Rollback(ctx)
-		return Migration{}, database.ErrDatabaseUnavailable
-	}
-	var item Migration
-	item, err = scanMigration(tx.QueryRow(ctx, migrationSelect+` WHERE version = $1 FOR UPDATE`, version))
-	if errors.Is(err, pgx.ErrNoRows) || isMissingMigrationTable(err) {
-		tx.Rollback(ctx)
-		return Migration{}, ErrMigrationNotFound
-	}
-	if err != nil {
-		tx.Rollback(ctx)
-		return Migration{}, err
-	}
-	if item.Status != "draft" {
-		tx.Rollback(ctx)
-		return Migration{}, ErrMigrationLocked
-	}
-	if _, err := tx.Exec(ctx, `UPDATE platform_migrations SET status = 'running', executed_by = $2 WHERE version = $1`, version, userID); err != nil {
-		tx.Rollback(ctx)
+		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
 	batchStartedAt := time.Now()
@@ -235,20 +228,17 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	}
 	if execErr != nil {
 		tx.Rollback(ctx)
-		if markFailedErr := markFailed(ctx, pool, version, userID, execErr.Error()); markFailedErr != nil {
+		if markFailedErr := s.markFailed(ctx, databaseID, version, userID, execErr.Error()); markFailedErr != nil {
 			return Migration{}, markFailedErr
 		}
 		return Migration{}, ErrMigrationFailed
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE platform_migrations
-		SET status = 'success', executed_by = $2, executed_at = NOW(), error_message = NULL
-		WHERE version = $1`, version, userID); err != nil {
-		tx.Rollback(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Migration{}, database.ErrDatabaseUnavailable
+	if err := s.markSuccess(ctx, databaseID, version, userID); err != nil {
+		return Migration{}, err
 	}
 	item.Status = "success"
 	item.ExecutedBy = &userID
@@ -267,7 +257,7 @@ func (s *Service) recordPoolStats(pool *pgxpool.Pool) {
 }
 
 const migrationColumns = `version, sql_text, created_by, executed_by, created_at, executed_at, status, error_message`
-const migrationSelect = `SELECT ` + migrationColumns + ` FROM platform_migrations`
+const migrationSelect = `SELECT ` + migrationColumns + ` FROM migrations`
 
 type rowScanner interface {
 	Scan(...any) error
@@ -286,46 +276,85 @@ func scanMigration(row rowScanner, optional ...*Migration) (Migration, error) {
 	return item, err
 }
 
-func insertMigration(ctx context.Context, tx pgx.Tx, version int64, sqlText string, userID int64, status string) (Migration, error) {
-	return scanMigration(tx.QueryRow(ctx, `
-		INSERT INTO platform_migrations (version, sql_text, created_by, status)
-		VALUES ($1, $2, $3, $4)
-		RETURNING `+migrationColumns, version, sqlText, userID, status))
-}
-
-func ensureTable(ctx context.Context, executor interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-}) error {
-	_, err := executor.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS platform_migrations (
-			version BIGINT PRIMARY KEY,
-			sql_text TEXT NOT NULL,
-			created_by BIGINT NOT NULL,
-			executed_by BIGINT,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			executed_at TIMESTAMPTZ,
-			status TEXT NOT NULL CHECK (status IN ('draft', 'running', 'success', 'failed')),
-			error_message TEXT
-		)`)
-	return err
-}
-
-func isMissingMigrationTable(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
-}
-
 func lockMigrations(ctx context.Context, tx pgx.Tx) error {
-	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('platform_migrations', 0))`)
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('migration_execution', 0))`)
 	return err
 }
 
-func markFailed(ctx context.Context, pool *pgxpool.Pool, version, userID int64, message string) error {
-	_, err := pool.Exec(ctx, `
-		UPDATE platform_migrations
-		SET status = 'failed', executed_by = $2, executed_at = NOW(), error_message = $3
-		WHERE version = $1`, version, userID, message)
+func lockInternalMigrations(ctx context.Context, tx *sql.Tx, databaseID database.DatabaseID) error {
+	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, databaseID)
 	return err
+}
+
+func (s *Service) startExecution(
+	ctx context.Context,
+	databaseID database.DatabaseID,
+	version, userID int64,
+) (Migration, error) {
+	tx, err := s.internalDB.BeginTx(ctx, nil)
+	if err != nil {
+		return Migration{}, ErrMigrationStore
+	}
+	defer tx.Rollback()
+	if err := lockInternalMigrations(ctx, tx, databaseID); err != nil {
+		return Migration{}, ErrMigrationStore
+	}
+
+	item, err := scanMigration(tx.QueryRowContext(ctx,
+		migrationSelect+` WHERE database_id = $1 AND version = $2 FOR UPDATE`, databaseID, version))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Migration{}, ErrMigrationNotFound
+	}
+	if err != nil {
+		return Migration{}, ErrMigrationStore
+	}
+	if item.Status != "draft" {
+		return Migration{}, ErrMigrationLocked
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE migrations
+		SET status = 'running', executed_by = $3, error_message = NULL
+		WHERE database_id = $1 AND version = $2`, databaseID, version, userID); err != nil {
+		return Migration{}, ErrMigrationStore
+	}
+	if err := tx.Commit(); err != nil {
+		return Migration{}, ErrMigrationStore
+	}
+	item.Status = "running"
+	item.ExecutedBy = &userID
+	return item, nil
+}
+
+func (s *Service) markSuccess(
+	ctx context.Context,
+	databaseID database.DatabaseID,
+	version, userID int64,
+) error {
+	_, err := s.internalDB.ExecContext(ctx, `
+		UPDATE migrations
+		SET status = 'success', executed_by = $3, executed_at = NOW(), error_message = NULL
+		WHERE database_id = $1 AND version = $2`, databaseID, version, userID)
+	if err != nil {
+		return ErrMigrationStore
+	}
+	return nil
+}
+
+func (s *Service) markFailed(
+	ctx context.Context,
+	databaseID database.DatabaseID,
+	version, userID int64,
+	message string,
+) error {
+	_, err := s.internalDB.ExecContext(ctx, `
+		UPDATE migrations
+		SET status = 'failed', executed_by = $3, executed_at = NOW(), error_message = $4
+		WHERE database_id = $1 AND version = $2`, databaseID, version, userID, message)
+	if err != nil {
+		return ErrMigrationStore
+	}
+	return nil
 }
 
 func validateSQL(sqlText string) error {
