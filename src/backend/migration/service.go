@@ -124,11 +124,11 @@ func (s *Service) Update(ctx context.Context, databaseID database.DatabaseID, ve
 	if item.Status != "draft" {
 		return Migration{}, ErrMigrationLocked
 	}
-	err = pool.QueryRow(ctx, `
+	item, err = scanMigration(pool.QueryRow(ctx, `
 		UPDATE platform_migrations
 		SET sql_text = $2
 		WHERE version = $1 AND status = 'draft'
-		RETURNING `+migrationColumns, version, sqlText).Scan(migrationScanArgs(&item)...)
+		RETURNING `+migrationColumns, version, sqlText))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Migration{}, ErrMigrationLocked
 	}
@@ -235,10 +235,6 @@ func scanMigration(row rowScanner, optional ...*Migration) (Migration, error) {
 		*optional[0] = item
 	}
 	return item, err
-}
-
-func migrationScanArgs(item *Migration) []any {
-	return []any{&item.Version, &item.SQL, &item.CreatedBy, &item.ExecutedBy, &item.CreatedAt, &item.ExecutedAt, &item.Status, &item.ErrorMessage}
 }
 
 func insertMigration(ctx context.Context, tx pgx.Tx, version int64, sqlText string, userID int64, status string) (Migration, error) {

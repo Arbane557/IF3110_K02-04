@@ -198,30 +198,32 @@ Implementasi saat ini memakai `EXPLAIN`, sehingga menampilkan rencana dan estima
 
 ## Testing
 
-Jalankan seluruh test:
+Jalankan unit test tanpa database:
 
 ```bash
 cd src/backend
-go test ./...
+go test -count=1 ./...
 ```
 
 Untuk menjalankan integration test PostgreSQL secara lokal, sediakan database test lalu atur URL-nya:
 
 ```powershell
-$env:INTEGRATION_DATABASE_URL = "postgres://app:secret@localhost:55432/app?sslmode=disable"
+$env:INTEGRATION_DATABASE_URL = "postgres://app:secret@localhost:55433/wbd_test?sslmode=disable"
 cd src/backend
-go test ./...
+go test -tags=integration -count=1 -timeout=120s ./...
 ```
 
 Test mencakup validasi registry, enkripsi credential, handler authorization, connection manager, catalog schema/table/constraint/index/data, dan lifecycle migration.
+
+Panduan fixture dan update test: [test.md](test.md). Syarat unit/integration untuk setiap fitur yang di-push: [testing_req.md](testing_req.md). Integration memakai schema terisolasi dan wajib menggunakan database test disposable; jangan gunakan database aplikasi/production.
 
 ## Continuous Integration
 
 Workflow [CI](.github/workflows/ci.yml) berjalan pada setiap `push` dan `pull_request`:
 
-1. Menjalankan unit test dengan `go test ./...`.
+1. Menjalankan unit test dengan race detector dan `go vet ./...`.
 2. Menjalankan PostgreSQL 17 service container.
-3. Menjalankan integration test dengan `INTEGRATION_DATABASE_URL`.
+3. Menjalankan integration test dengan tag `integration`, `INTEGRATION_DATABASE_URL`, race detector, shuffle, dan dua pengulangan.
 
 ## Batasan
 
