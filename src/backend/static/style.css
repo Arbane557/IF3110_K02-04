@@ -241,6 +241,24 @@ td {
     min-height: 1.4em;
 }
 
+#plan-section {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+}
+
+#plan-output {
+    max-width: 100%;
+    margin: 0;
+    padding: 14px;
+    overflow-x: auto;
+    border: 1px solid #d9d9d9;
+    border-radius: 6px;
+    background: #f7f7f7;
+    white-space: pre;
+    font: 0.875rem/1.5 monospace;
+}
+
 .error {
     color: #b00020;
 }
