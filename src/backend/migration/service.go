@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"wbd/backend/database"
+	"wbd/backend/observability"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -23,11 +24,16 @@ var (
 )
 
 type Service struct {
-	pools database.TargetPoolProvider
+	pools    database.TargetPoolProvider
+	observer observability.Observer
 }
 
-func NewService(pools database.TargetPoolProvider) *Service {
-	return &Service{pools: pools}
+func NewService(pools database.TargetPoolProvider, observers ...observability.Observer) *Service {
+	service := &Service{pools: pools}
+	if len(observers) > 0 {
+		service.observer = observers[0]
+	}
+	return service
 }
 
 func (s *Service) List(ctx context.Context, databaseID database.DatabaseID) ([]Migration, error) {
@@ -158,7 +164,23 @@ func (s *Service) Explain(ctx context.Context, databaseID database.DatabaseID, s
 	return strings.Join(lines, "\n"), nil
 }
 
-func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, version, userID int64) (Migration, error) {
+func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, version, userID int64) (result Migration, err error) {
+	startedAt := time.Now()
+	defer func() {
+		if s.observer == nil {
+			return
+		}
+		status := "success"
+		if err != nil {
+			status = "failed"
+		}
+		s.observer.RecordMigration(observability.MigrationResult{
+			Direction: "up",
+			Status:    status,
+			Duration:  time.Since(startedAt),
+		})
+	}()
+
 	if version <= 0 || userID <= 0 {
 		return Migration{}, ErrInvalidVersion
 	}
@@ -170,6 +192,8 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	if err != nil {
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
+	s.recordPoolStats(pool)
+	defer s.recordPoolStats(pool)
 	if err := lockMigrations(ctx, tx); err != nil {
 		tx.Rollback(ctx)
 		return Migration{}, database.ErrDatabaseUnavailable
@@ -192,9 +216,26 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 		tx.Rollback(ctx)
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
-	if _, err := tx.Exec(ctx, item.SQL); err != nil {
+	batchStartedAt := time.Now()
+	commandTag, execErr := tx.Exec(ctx, item.SQL)
+	if s.observer != nil {
+		batchStatus := "success"
+		if execErr != nil {
+			batchStatus = "failed"
+		}
+		rowsAffected := int64(0)
+		if execErr == nil {
+			rowsAffected = commandTag.RowsAffected()
+		}
+		s.observer.RecordBatch(observability.BatchResult{
+			Status:       batchStatus,
+			Duration:     time.Since(batchStartedAt),
+			RowsAffected: rowsAffected,
+		})
+	}
+	if execErr != nil {
 		tx.Rollback(ctx)
-		if markFailedErr := markFailed(ctx, pool, version, userID, err.Error()); markFailedErr != nil {
+		if markFailedErr := markFailed(ctx, pool, version, userID, execErr.Error()); markFailedErr != nil {
 			return Migration{}, markFailedErr
 		}
 		return Migration{}, ErrMigrationFailed
@@ -215,6 +256,14 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	item.ExecutedAt = &now
 	item.ErrorMessage = ""
 	return item, nil
+}
+
+func (s *Service) recordPoolStats(pool *pgxpool.Pool) {
+	if s.observer == nil {
+		return
+	}
+	stats := pool.Stat()
+	s.observer.SetDatabasePool(stats.AcquiredConns(), stats.IdleConns())
 }
 
 const migrationColumns = `version, sql_text, created_by, executed_by, created_at, executed_at, status, error_message`

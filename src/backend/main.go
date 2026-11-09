@@ -12,15 +12,20 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"wbd/backend/auth"
 	"wbd/backend/database"
 	"wbd/backend/migration"
+	"wbd/backend/observability"
 )
 
 type App struct {
 	Auth      *auth.Handler
 	Database  *database.Handler
 	Migration *migration.Handler
+	Metrics   http.Handler
 }
 
 func main() {
@@ -59,15 +64,22 @@ func main() {
 	}
 	registryRepository := database.NewPostgresRegistryRepository(internalDB)
 	connectionManager := database.NewConnectionManager(registryRepository, protector)
+	metricsRegistry := prometheus.NewRegistry()
+	metricsRegistry.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+	observabilityService := observability.NewService(metricsRegistry)
 	access := auth.NewAccessService(internalDB)
 	registry := database.NewRegistryService(registryRepository, connectionManager, protector)
 	catalog := database.NewCatalogService(connectionManager)
-	migrationService := migration.NewService(connectionManager)
+	migrationService := migration.NewService(connectionManager, observabilityService)
 
 	app := &App{
 		Auth:      auth.NewHandler(auth.NewService(internalDB, protector), templates),
 		Database:  database.NewHandler(registry, catalog, access, templates),
 		Migration: migration.NewHandler(templates, migrationService, access),
+		Metrics:   promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{}),
 	}
 
 	defer connectionManager.Close()

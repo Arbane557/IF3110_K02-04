@@ -8,6 +8,9 @@ func (app *App) routes() http.Handler {
 	app.registerAuthRoutes(mux)
 	app.registerDatabaseRoutes(mux)
 	app.registerMigrationRoutes(mux)
+	if app.Metrics != nil {
+		mux.Handle("GET /metrics", app.Metrics)
+	}
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	return mux
 }
