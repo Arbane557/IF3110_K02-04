@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"wbd/backend/auth"
 	"wbd/backend/database"
 	"wbd/backend/migration"
@@ -69,7 +70,16 @@ func main() {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
-	observabilityService := observability.NewService(metricsRegistry)
+	tracerContext, cancelTracerContext := context.WithTimeout(context.Background(), 10*time.Second)
+	tracerProvider, err := observability.NewTracerProvider(tracerContext)
+	cancelTracerContext()
+	if err != nil {
+		log.Fatal("initialize tracing:", err)
+	}
+	observabilityService := observability.NewService(
+		metricsRegistry,
+		tracerProvider.Tracer("wbd/backend"),
+	)
 	access := auth.NewAccessService(internalDB)
 	registry := database.NewRegistryService(registryRepository, connectionManager, protector)
 	catalog := database.NewCatalogService(connectionManager)
@@ -85,8 +95,12 @@ func main() {
 	defer connectionManager.Close()
 
 	server := &http.Server{
-		Addr:              ":6969",
-		Handler:           app.routes(),
+		Addr: ":6969",
+		Handler: otelhttp.NewHandler(app.routes(), observability.SpanHTTP,
+			otelhttp.WithFilter(func(r *http.Request) bool {
+				return r.URL.Path != "/metrics" && r.URL.Path != "/health"
+			}),
+		),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -94,7 +108,7 @@ func main() {
 	}
 
 	log.Println("server running on http://localhost:6969")
-	log.Fatal(server.ListenAndServe())
+	server.ListenAndServe()
 }
 
 func (app *App) healthHandler(w http.ResponseWriter, r *http.Request) {

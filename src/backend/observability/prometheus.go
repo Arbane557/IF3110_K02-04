@@ -71,3 +71,15 @@ func (m *prometheusMetrics) setDatabasePool(active, idle int32) {
 	m.poolConnections.WithLabelValues("active").Set(float64(active))
 	m.poolConnections.WithLabelValues("idle").Set(float64(idle))
 }
+
+func (s *Service) RecordMigration(result MigrationResult) {
+	s.metrics.recordMigration(result)
+}
+
+func (s *Service) RecordBatch(result BatchResult) {
+	s.metrics.recordBatch(result)
+}
+
+func (s *Service) SetDatabasePool(active, idle int32) {
+	s.metrics.setDatabasePool(active, idle)
+}

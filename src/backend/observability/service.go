@@ -1,23 +1,18 @@
 package observability
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/trace"
+)
 
 type Service struct {
 	metrics *prometheusMetrics
+	tracer  trace.Tracer
 }
 
-func NewService(registerer prometheus.Registerer) *Service {
-	return &Service{metrics: newPrometheusMetrics(registerer)}
-}
-
-func (s *Service) RecordMigration(result MigrationResult) {
-	s.metrics.recordMigration(result)
-}
-
-func (s *Service) RecordBatch(result BatchResult) {
-	s.metrics.recordBatch(result)
-}
-
-func (s *Service) SetDatabasePool(active, idle int32) {
-	s.metrics.setDatabasePool(active, idle)
+func NewService(registerer prometheus.Registerer, tracer trace.Tracer) *Service {
+	return &Service{
+		metrics: newPrometheusMetrics(registerer),
+		tracer:  tracer,
+	}
 }

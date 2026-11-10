@@ -167,7 +167,15 @@ func (s *Service) Explain(ctx context.Context, databaseID database.DatabaseID, s
 
 func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, version, userID int64) (result Migration, err error) {
 	startedAt := time.Now()
+
+	// Full migration
+	ctx, executionSpan := s.startTrace(ctx, observability.SpanMigrationExecute, observability.Fields{
+		"database.id":         int64(databaseID),
+		"migration.version":   version,
+		"migration.direction": "up",
+	})
 	defer func() {
+		endTrace(executionSpan, err)
 		if s.observer == nil {
 			return
 		}
@@ -188,29 +196,68 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	if s.internalDB == nil {
 		return Migration{}, ErrMigrationStore
 	}
-	item, err := s.startExecution(ctx, databaseID, version, userID)
+
+	// Start record
+	startContext, startSpan := s.startTrace(ctx, observability.SpanMigrationStartExecution, observability.Fields{
+		"database.id":       int64(databaseID),
+		"migration.version": version,
+	})
+	item, err := s.startExecution(startContext, databaseID, version, userID)
+	endTrace(startSpan, err)
 	if err != nil {
 		return Migration{}, err
 	}
-	pool, err := s.pools.Pool(ctx, databaseID)
+
+	// Get target DB
+	acquireContext, acquireSpan := s.startTrace(ctx, observability.SpanMigrationAcquireTarget, observability.Fields{
+		"database.id": int64(databaseID),
+	})
+	pool, err := s.pools.Pool(acquireContext, databaseID)
+	endTrace(acquireSpan, err)
 	if err != nil {
 		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
 		return Migration{}, err
 	}
-	tx, err := pool.Begin(ctx)
+
+	// Begin transaction
+	beginContext, beginSpan := s.startTrace(ctx, observability.SpanMigrationBeginTarget, observability.Fields{
+		"database.id": int64(databaseID),
+	})
+	tx, err := pool.Begin(beginContext)
+	endTrace(beginSpan, err)
 	if err != nil {
 		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
 	s.recordPoolStats(pool)
 	defer s.recordPoolStats(pool)
-	if err := lockMigrations(ctx, tx); err != nil {
-		tx.Rollback(ctx)
+
+	// Lock migration
+	lockContext, lockSpan := s.startTrace(ctx, observability.SpanMigrationLockTarget, observability.Fields{
+		"database.id": int64(databaseID),
+	})
+	err = lockMigrations(lockContext, tx)
+	endTrace(lockSpan, err)
+	if err != nil {
+		s.rollbackTarget(ctx, tx, databaseID)
 		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
+
+	// Run SQL batch
 	batchStartedAt := time.Now()
-	commandTag, execErr := tx.Exec(ctx, item.SQL)
+	batchContext, batchSpan := s.startTrace(ctx, observability.SpanMigrationBatch, observability.Fields{
+		"database.id":       int64(databaseID),
+		"migration.version": version,
+		"batch.number":      1,
+	})
+	commandTag, execErr := tx.Exec(batchContext, item.SQL)
+	if execErr == nil && batchSpan != nil {
+		batchSpan.AddEvent(observability.EventMigrationBatchResult, observability.Fields{
+			"batch.rows_affected": commandTag.RowsAffected(),
+		})
+	}
+	endTrace(batchSpan, execErr)
 	if s.observer != nil {
 		batchStatus := "success"
 		if execErr != nil {
@@ -227,16 +274,25 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 		})
 	}
 	if execErr != nil {
-		tx.Rollback(ctx)
+		s.rollbackTarget(ctx, tx, databaseID)
 		if markFailedErr := s.markFailed(ctx, databaseID, version, userID, execErr.Error()); markFailedErr != nil {
 			return Migration{}, markFailedErr
 		}
 		return Migration{}, ErrMigrationFailed
 	}
-	if err := tx.Commit(ctx); err != nil {
+
+	// Commit transaction
+	commitContext, commitSpan := s.startTrace(ctx, observability.SpanMigrationCommitTarget, observability.Fields{
+		"database.id": int64(databaseID),
+	})
+	err = tx.Commit(commitContext)
+	endTrace(commitSpan, err)
+	if err != nil {
 		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
+
+	// Finish record
 	if err := s.markSuccess(ctx, databaseID, version, userID); err != nil {
 		return Migration{}, err
 	}
@@ -246,6 +302,31 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	item.ExecutedAt = &now
 	item.ErrorMessage = ""
 	return item, nil
+}
+
+func (s *Service) startTrace(
+	ctx context.Context,
+	name string,
+	fields observability.Fields,
+) (context.Context, observability.Span) {
+	if s.observer == nil {
+		return ctx, nil
+	}
+	return s.observer.StartTrace(ctx, name, fields)
+}
+
+func endTrace(span observability.Span, err error) {
+	if span != nil {
+		span.End(err)
+	}
+}
+
+func (s *Service) rollbackTarget(ctx context.Context, tx pgx.Tx, databaseID database.DatabaseID) {
+	rollbackContext, span := s.startTrace(ctx, observability.SpanMigrationRollbackTarget, observability.Fields{
+		"database.id": int64(databaseID),
+	})
+	err := tx.Rollback(rollbackContext)
+	endTrace(span, err)
 }
 
 func (s *Service) recordPoolStats(pool *pgxpool.Pool) {
@@ -331,10 +412,15 @@ func (s *Service) markSuccess(
 	databaseID database.DatabaseID,
 	version, userID int64,
 ) error {
+	ctx, span := s.startTrace(ctx, observability.SpanMigrationMarkSuccess, observability.Fields{
+		"database.id":       int64(databaseID),
+		"migration.version": version,
+	})
 	_, err := s.internalDB.ExecContext(ctx, `
 		UPDATE migrations
 		SET status = 'success', executed_by = $3, executed_at = NOW(), error_message = NULL
 		WHERE database_id = $1 AND version = $2`, databaseID, version, userID)
+	endTrace(span, err)
 	if err != nil {
 		return ErrMigrationStore
 	}
@@ -347,10 +433,15 @@ func (s *Service) markFailed(
 	version, userID int64,
 	message string,
 ) error {
+	ctx, span := s.startTrace(ctx, observability.SpanMigrationMarkFailed, observability.Fields{
+		"database.id":       int64(databaseID),
+		"migration.version": version,
+	})
 	_, err := s.internalDB.ExecContext(ctx, `
 		UPDATE migrations
 		SET status = 'failed', executed_by = $3, executed_at = NOW(), error_message = $4
 		WHERE database_id = $1 AND version = $2`, databaseID, version, userID, message)
+	endTrace(span, err)
 	if err != nil {
 		return ErrMigrationStore
 	}
