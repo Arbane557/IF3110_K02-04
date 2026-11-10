@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"wbd/backend/observability"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -175,13 +177,31 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 		"migration.direction": "up",
 	})
 	defer func() {
-		endTrace(executionSpan, err)
-		if s.observer == nil {
-			return
-		}
 		status := "success"
+		level := slog.LevelInfo
 		if err != nil {
 			status = "failed"
+			level = slog.LevelError
+		}
+		fields := observability.Fields{
+			"actor":               userID,
+			"database":            int64(databaseID),
+			"status":              status,
+			"migration.version":   version,
+			"migration.direction": "up",
+			"duration_ms":         time.Since(startedAt).Milliseconds(),
+		}
+		if err != nil {
+			fields["error"] = err.Error()
+			if state := sqlState(err); state != "" {
+				fields["sqlstate"] = state
+			}
+		}
+		s.log(ctx, level, observability.EventMigrationFinished, fields)
+		endTrace(executionSpan, err)
+
+		if s.observer == nil {
+			return
 		}
 		s.observer.RecordMigration(observability.MigrationResult{
 			Direction: "up",
@@ -189,6 +209,13 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 			Duration:  time.Since(startedAt),
 		})
 	}()
+	s.log(ctx, slog.LevelInfo, observability.EventMigrationStarted, observability.Fields{
+		"actor":               userID,
+		"database":            int64(databaseID),
+		"status":              "running",
+		"migration.version":   version,
+		"migration.direction": "up",
+	})
 
 	if version <= 0 || userID <= 0 {
 		return Migration{}, ErrInvalidVersion
@@ -239,7 +266,7 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	err = lockMigrations(lockContext, tx)
 	endTrace(lockSpan, err)
 	if err != nil {
-		s.rollbackTarget(ctx, tx, databaseID)
+		s.rollbackTarget(ctx, tx, databaseID, version, userID)
 		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
@@ -251,7 +278,45 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 		"migration.version": version,
 		"batch.number":      1,
 	})
+	s.log(batchContext, slog.LevelInfo, observability.EventBatchStarted, observability.Fields{
+		"actor":             userID,
+		"database":          int64(databaseID),
+		"status":            "running",
+		"migration.version": version,
+		"attempt":           1,
+		"batch":             1,
+		"query":             item.SQL,
+		"parameters":        []any{},
+	})
 	commandTag, execErr := tx.Exec(batchContext, item.SQL)
+	batchStatus := "success"
+	rowsAffected := int64(0)
+	batchLevel := slog.LevelInfo
+	if execErr != nil {
+		batchStatus = "failed"
+		batchLevel = slog.LevelError
+	} else {
+		rowsAffected = commandTag.RowsAffected()
+	}
+	batchFields := observability.Fields{
+		"actor":             userID,
+		"database":          int64(databaseID),
+		"status":            batchStatus,
+		"migration.version": version,
+		"attempt":           1,
+		"batch":             1,
+		"query":             item.SQL,
+		"parameters":        []any{},
+		"duration_ms":       time.Since(batchStartedAt).Milliseconds(),
+		"rows":              rowsAffected,
+	}
+	if execErr != nil {
+		batchFields["error"] = execErr.Error()
+		if state := sqlState(execErr); state != "" {
+			batchFields["sqlstate"] = state
+		}
+	}
+	s.log(batchContext, batchLevel, observability.EventBatchFinished, batchFields)
 	if execErr == nil && batchSpan != nil {
 		batchSpan.AddEvent(observability.EventMigrationBatchResult, observability.Fields{
 			"batch.rows_affected": commandTag.RowsAffected(),
@@ -259,14 +324,6 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	}
 	endTrace(batchSpan, execErr)
 	if s.observer != nil {
-		batchStatus := "success"
-		if execErr != nil {
-			batchStatus = "failed"
-		}
-		rowsAffected := int64(0)
-		if execErr == nil {
-			rowsAffected = commandTag.RowsAffected()
-		}
 		s.observer.RecordBatch(observability.BatchResult{
 			Status:       batchStatus,
 			Duration:     time.Since(batchStartedAt),
@@ -274,7 +331,7 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 		})
 	}
 	if execErr != nil {
-		s.rollbackTarget(ctx, tx, databaseID)
+		s.rollbackTarget(ctx, tx, databaseID, version, userID)
 		if markFailedErr := s.markFailed(ctx, databaseID, version, userID, execErr.Error()); markFailedErr != nil {
 			return Migration{}, markFailedErr
 		}
@@ -285,7 +342,26 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	commitContext, commitSpan := s.startTrace(ctx, observability.SpanMigrationCommitTarget, observability.Fields{
 		"database.id": int64(databaseID),
 	})
+	commitStartedAt := time.Now()
 	err = tx.Commit(commitContext)
+	commitStatus := "success"
+	commitLevel := slog.LevelInfo
+	commitFields := observability.Fields{
+		"actor":             userID,
+		"database":          int64(databaseID),
+		"migration.version": version,
+		"duration_ms":       time.Since(commitStartedAt).Milliseconds(),
+	}
+	if err != nil {
+		commitStatus = "failed"
+		commitLevel = slog.LevelError
+		commitFields["error"] = err.Error()
+		if state := sqlState(err); state != "" {
+			commitFields["sqlstate"] = state
+		}
+	}
+	commitFields["status"] = commitStatus
+	s.log(commitContext, commitLevel, observability.EventCommit, commitFields)
 	endTrace(commitSpan, err)
 	if err != nil {
 		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
@@ -321,12 +397,50 @@ func endTrace(span observability.Span, err error) {
 	}
 }
 
-func (s *Service) rollbackTarget(ctx context.Context, tx pgx.Tx, databaseID database.DatabaseID) {
+func (s *Service) log(ctx context.Context, level slog.Level, event string, fields observability.Fields) {
+	if s.observer != nil {
+		s.observer.Log(ctx, level, event, fields)
+	}
+}
+
+func (s *Service) rollbackTarget(
+	ctx context.Context,
+	tx pgx.Tx,
+	databaseID database.DatabaseID,
+	version, userID int64,
+) {
 	rollbackContext, span := s.startTrace(ctx, observability.SpanMigrationRollbackTarget, observability.Fields{
 		"database.id": int64(databaseID),
 	})
+	startedAt := time.Now()
 	err := tx.Rollback(rollbackContext)
+	status := "success"
+	level := slog.LevelInfo
+	fields := observability.Fields{
+		"actor":             userID,
+		"database":          int64(databaseID),
+		"migration.version": version,
+		"duration_ms":       time.Since(startedAt).Milliseconds(),
+	}
+	if err != nil {
+		status = "failed"
+		level = slog.LevelError
+		fields["error"] = err.Error()
+		if state := sqlState(err); state != "" {
+			fields["sqlstate"] = state
+		}
+	}
+	fields["status"] = status
+	s.log(rollbackContext, level, observability.EventRollback, fields)
 	endTrace(span, err)
+}
+
+func sqlState(err error) string {
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) {
+		return postgresError.Code
+	}
+	return ""
 }
 
 func (s *Service) recordPoolStats(pool *pgxpool.Pool) {

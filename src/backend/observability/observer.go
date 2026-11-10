@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"log/slog"
 	"time"
 )
 
@@ -22,9 +23,14 @@ type MetricsRecorder interface {
 	SetDatabasePool(active, idle int32)
 }
 
+type Logger interface {
+	Log(ctx context.Context, level slog.Level, event string, fields Fields)
+}
+
 type Observer interface {
 	Tracer
 	MetricsRecorder
+	Logger
 }
 
 type MigrationResult struct {
