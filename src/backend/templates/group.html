@@ -58,10 +58,13 @@
             members.replaceChildren();
             for (const user of details.members) {
                 const item = document.createElement("li");
-                item.append(document.createTextNode(user.username));
+                const isLeader = user.id === details.leaderId;
+                item.append(document.createTextNode(isLeader ? `${user.username} (Leader)` : user.username));
                 const remove = document.createElement("button");
                 remove.type = "button";
                 remove.textContent = "Remove";
+                remove.disabled = isLeader;
+                if (isLeader) remove.title = "Change the leader before removing this member";
                 remove.addEventListener("click", async () => {
                     try {
                         await requestJSON(`/api/auth/groups/${groupId}/members/${user.id}`, { method: "DELETE" });

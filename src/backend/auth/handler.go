@@ -235,14 +235,17 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Name string `json:"name"`
+		Name         string `json:"name"`
+		LeaderUserID int64  `json:"leaderUserId"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	group, err := h.service.CreateGroup(r.Context(), request.Name)
+	group, err := h.service.CreateGroup(r.Context(), request.Name, request.LeaderUserID)
 	if errors.Is(err, ErrInvalidGroup) {
-		writeError(w, http.StatusBadRequest, "group name is required and must be at most 100 characters")
+		writeError(w, http.StatusBadRequest, "group name and leader are required")
+	} else if errors.Is(err, ErrInvalidLeader) {
+		writeError(w, http.StatusBadRequest, "leader user does not exist")
 	} else if isUniqueViolation(err) {
 		writeError(w, http.StatusConflict, "group name already exists")
 	} else if err != nil {
@@ -304,6 +307,10 @@ func (h *Handler) RemoveGroupMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.service.RemoveGroupMember(r.Context(), groupID, userID); err != nil {
+		if errors.Is(err, ErrLeaderRemoval) {
+			writeError(w, http.StatusConflict, "change the group leader before removing this member")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "could not remove group member")
 		return
 	}

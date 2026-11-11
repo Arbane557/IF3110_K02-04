@@ -16,11 +16,13 @@ import (
 )
 
 var (
-	ErrInvalidUser  = errors.New("invalid user")
-	ErrUsernameTaken = errors.New("username already exists")
-	ErrInvalidGroup = errors.New("invalid group")
+	ErrInvalidUser    = errors.New("invalid user")
+	ErrUsernameTaken  = errors.New("username already exists")
+	ErrInvalidGroup   = errors.New("invalid group")
+	ErrInvalidLeader  = errors.New("leader must be a group member")
+	ErrLeaderRemoval  = errors.New("group leader cannot be removed")
 	ErrInvalidSession = errors.New("invalid or expired session")
-	ErrUserNotFound = errors.New("user not found")
+	ErrUserNotFound   = errors.New("user not found")
 )
 
 const (
@@ -56,6 +58,7 @@ type GroupDatabase struct {
 
 type GroupDetails struct {
 	Group     Group           `json:"group"`
+	LeaderID  int64           `json:"leaderId"`
 	Members   []User          `json:"members"`
 	Users     []User          `json:"users"`
 	Databases []GroupDatabase `json:"databases"`
@@ -63,8 +66,8 @@ type GroupDetails struct {
 
 // Service handles account lookup and server-side session persistence.
 type Service struct {
-	db              *sql.DB
-	tokenProtector  SessionTokenProtector
+	db             *sql.DB
+	tokenProtector SessionTokenProtector
 }
 
 type SessionTokenProtector interface {
@@ -173,22 +176,44 @@ func (s *Service) ListGroups(ctx context.Context) ([]Group, error) {
 	return groups, rows.Err()
 }
 
-func (s *Service) CreateGroup(ctx context.Context, name string) (Group, error) {
+func (s *Service) CreateGroup(ctx context.Context, name string, leaderIDs ...int64) (Group, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || utf8.RuneCountInString(name) > 100 {
+	if name == "" || utf8.RuneCountInString(name) > 100 || len(leaderIDs) != 1 || leaderIDs[0] <= 0 {
 		return Group{}, ErrInvalidGroup
 	}
+	leaderID := leaderIDs[0]
 	var group Group
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO groups (name) VALUES ($1)
-		RETURNING id, name`, name).Scan(&group.ID, &group.Name)
-	return group, err
+		WITH new_group AS (
+			INSERT INTO groups (name, leader_user_id)
+			SELECT $1, id FROM users WHERE id = $2
+			RETURNING id, name
+		), add_leader AS (
+			INSERT INTO group_members (group_id, user_id)
+			SELECT id, $2 FROM new_group
+		)
+		SELECT id, name FROM new_group`, name, leaderID).Scan(&group.ID, &group.Name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Group{}, ErrInvalidLeader
+	}
+	if err != nil {
+		return Group{}, err
+	}
+	return group, nil
 }
 
 func (s *Service) GroupDetails(ctx context.Context, groupID int64) (GroupDetails, error) {
 	var details GroupDetails
-	err := s.db.QueryRowContext(ctx, `SELECT id, name FROM groups WHERE id = $1`, groupID).
-		Scan(&details.Group.ID, &details.Group.Name)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT g.id, g.name, u.id
+		FROM groups g
+		JOIN users u ON u.id = g.leader_user_id
+		WHERE g.id = $1`, groupID).
+		Scan(
+			&details.Group.ID,
+			&details.Group.Name,
+			&details.LeaderID,
+		)
 	if err != nil {
 		return GroupDetails{}, err
 	}
@@ -256,6 +281,14 @@ func (s *Service) RemoveGroupMember(ctx context.Context, groupID, userID int64) 
 		return err
 	}
 	defer tx.Rollback()
+	var leaderID int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT leader_user_id FROM groups WHERE id = $1 FOR UPDATE`, groupID).Scan(&leaderID); err != nil {
+		return err
+	}
+	if leaderID == userID {
+		return ErrLeaderRemoval
+	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM group_members WHERE group_id = $1 AND user_id = $2`, groupID, userID)
 	if err != nil {
 		return err

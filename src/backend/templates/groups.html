@@ -19,6 +19,7 @@
             <h2>Add group</h2>
             <form id="group-form" class="form-grid">
                 <label>Group name<input name="name" required maxlength="100"></label>
+                <label>Leader<select name="leaderUserId" required></select></label>
                 <button type="submit">Add group</button>
             </form>
             <p id="form-status" class="status" role="status" aria-live="polite"></p>
@@ -56,21 +57,41 @@
                 }
             } catch (error) { status.textContent = error.message; }
         }
+        async function loadLeaderOptions() {
+            const select = document.querySelector('[name="leaderUserId"]');
+            const button = document.querySelector("#group-form button");
+            const users = await requestJSON("/api/auth/users");
+            select.replaceChildren();
+            for (const user of users) {
+                const option = document.createElement("option");
+                option.value = user.id;
+                option.textContent = `${user.username} (${user.role})`;
+                select.append(option);
+            }
+            button.disabled = users.length === 0;
+            if (!users.length) document.querySelector("#form-status").textContent = "Create a user before creating a group.";
+        }
         document.querySelector("#group-form").addEventListener("submit", async (event) => {
             event.preventDefault();
             const status = document.querySelector("#form-status");
             const form = event.currentTarget;
+            const values = new FormData(form);
             try {
                 await requestJSON("/api/auth/groups", {
                     method: "POST", headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(Object.fromEntries(new FormData(form))),
+                    body: JSON.stringify({
+                        name: values.get("name"),
+                        leaderUserId: Number(values.get("leaderUserId")),
+                    }),
                 });
                 form.reset();
                 status.textContent = "Group created.";
                 await loadGroups();
             } catch (error) { status.textContent = error.message; }
         });
-        loadGroups();
+        Promise.all([loadGroups(), loadLeaderOptions()]).catch(error => {
+            document.querySelector("#form-status").textContent = error.message;
+        });
     </script>
     <script>
         fetch("/whoami").then(response => response.json()).then(user => {
