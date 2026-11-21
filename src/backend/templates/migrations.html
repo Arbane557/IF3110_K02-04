@@ -27,6 +27,20 @@
         </section>
 
         <section>
+            <h2>Migrations</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr><th>Version</th><th>Created by</th><th>Executed by</th><th>Time</th><th>Status</th></tr>
+                    </thead>
+                    <tbody id="migration-list">
+                        <tr><td colspan="5">Select a database to load migrations.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section>
             <h2>Migration history</h2>
             <label><input type="checkbox" id="hide-rollback"> Hide rollback</label>
             <div class="table-wrap">
@@ -34,8 +48,8 @@
                     <thead>
                         <tr><th>Execution</th><th>Version</th><th>Direction</th><th>User</th><th>Time</th><th>Status</th><th>SQL</th></tr>
                     </thead>
-                    <tbody id="migration-list">
-                        <tr><td colspan="7">Select a database to load migration history.</td></tr>
+                    <tbody id="execution-history-list">
+                        <tr><td colspan="7">Select a database to load execution history.</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -69,6 +83,7 @@
         const databaseSelect = document.querySelector("#database-select");
         const migrationStatus = document.querySelector("#migration-status");
         const migrationList = document.querySelector("#migration-list");
+        const executionHistoryList = document.querySelector("#execution-history-list");
         const sqlEditor = document.querySelector("#migration-sql");
         const editorHelp = document.querySelector("#editor-help");
         const editorStatus = document.querySelector("#editor-status");
@@ -200,9 +215,9 @@
                 const entries = await requestJSON(
                     `/api/databases/${currentDatabase.id}/migrations/history?hideRollback=${hideRollback.checked}`,
                 );
-                migrationList.replaceChildren();
+                executionHistoryList.replaceChildren();
                 if (entries.length === 0) {
-                    migrationList.innerHTML = '<tr><td colspan="7">No migration attempts yet.</td></tr>';
+                    executionHistoryList.innerHTML = '<tr><td colspan="7">No migration attempts yet.</td></tr>';
                     return;
                 }
                 for (const entry of entries) {
@@ -221,7 +236,7 @@
                         cell.textContent = value ?? "-";
                         row.append(cell);
                     }
-                    migrationList.append(row);
+                    executionHistoryList.append(row);
                 }
             } catch (error) {
                 migrationStatus.textContent = error.message;
@@ -351,37 +366,39 @@
 
         rollbackButton.addEventListener("click", async () => {
             if (!currentDatabase || currentVersion === null) return;
-            if (!confirm(`Rollback migration ${currentVersion}?`)) return;
+            const version = currentVersion;
+            if (!confirm(`Rollback migration ${version}?`)) return;
             rollbackButton.disabled = true;
             try {
                 await requestJSON(
-                    `/api/databases/${currentDatabase.id}/migrations/${currentVersion}/rollback`,
+                    `/api/databases/${currentDatabase.id}/migrations/${version}/rollback`,
                     { method: "POST" },
                 );
-                editorStatus.textContent = `Migration ${currentVersion} rolled back.`;
+                editorStatus.textContent = `Migration ${version} rolled back.`;
             } catch (error) {
                 editorStatus.textContent = error.message;
             }
             await loadHistory();
-            await loadMigration(currentVersion);
+            await loadMigration(version);
             await loadExecutionHistory();
         });
 
         forwardButton.addEventListener("click", async () => {
             if (!currentDatabase || currentVersion === null) return;
-            if (!confirm(`Forward migration ${currentVersion}?`)) return;
+            const version = currentVersion;
+            if (!confirm(`Forward migration ${version}?`)) return;
             forwardButton.disabled = true;
             try {
                 await requestJSON(
-                    `/api/databases/${currentDatabase.id}/migrations/${currentVersion}/forward`,
+                    `/api/databases/${currentDatabase.id}/migrations/${version}/forward`,
                     { method: "POST" },
                 );
-                editorStatus.textContent = `Migration ${currentVersion} forwarded.`;
+                editorStatus.textContent = `Migration ${version} forwarded.`;
             } catch (error) {
                 editorStatus.textContent = error.message;
             }
             await loadHistory();
-            await loadMigration(currentVersion);
+            await loadMigration(version);
             await loadExecutionHistory();
         });
 
