@@ -55,7 +55,16 @@ func (h *Handler) CreateMigration(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := h.service.Create(r.Context(), id, principal.UserID, request.SQL)
+	sqlDown := request.SQLDown
+	if sqlDown == "" {
+		sqlDown = request.DownSQL
+	}
+	irreversible := request.Irreversible
+	if sqlDown == "" && request.IrreversibleReason == "" {
+		irreversible = true
+		// Legacy clients that send SQL only are treated as irreversible.
+	}
+	item, err := h.service.CreateWithDown(r.Context(), id, principal.UserID, request.SQL, sqlDown, request.Irreversible, request.IrreversibleReason)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -99,6 +108,11 @@ func (h *Handler) ExecuteMigration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (h *Handler) ExplainMigration(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +198,12 @@ func writeError(w http.ResponseWriter, err error) {
 		status, message = http.StatusNotFound, "migration not found"
 	case errors.Is(err, ErrMigrationLocked):
 		status, message = http.StatusConflict, "migration cannot be changed"
+	case errors.Is(err, ErrIrreversible):
+		status, message = http.StatusConflict, "migration is irreversible"
+	case errors.Is(err, ErrNotLatestActive):
+		status, message = http.StatusConflict, "only the latest active migration can be rolled back"
+	case errors.Is(err, ErrForwardNotNext):
+		status, message = http.StatusConflict, "migration is not the next forward migration"
 	case errors.Is(err, ErrMigrationFailed):
 		status, message = http.StatusUnprocessableEntity, "migration execution failed"
 	case errors.Is(err, database.ErrDatabaseUnavailable):
