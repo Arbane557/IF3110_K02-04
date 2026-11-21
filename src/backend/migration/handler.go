@@ -64,7 +64,7 @@ func (h *Handler) CreateMigration(w http.ResponseWriter, r *http.Request) {
 		irreversible = true
 		// Legacy clients that send SQL only are treated as irreversible.
 	}
-	item, err := h.service.CreateWithDown(r.Context(), id, principal.UserID, request.SQL, sqlDown, request.Irreversible, request.IrreversibleReason)
+	item, err := h.service.CreateWithDown(r.Context(), id, principal.UserID, request.SQL, sqlDown, irreversible, request.IrreversibleReason)
 	if err != nil {
 		writeError(w, err)
 		return

@@ -125,6 +125,8 @@
             currentActive = false;
             currentReversible = false;
             sqlEditor.value = "";
+            downSqlEditor.value = "";
+            irreversibleReason.value = "";
             editorHelp.textContent = currentDatabase?.accessLevel === "edit"
                 ? "Select a migration or start a new draft."
                 : "View Only access: you can inspect migration SQL and history.";
@@ -226,6 +228,7 @@
             }
             updateEditorControls();
             await loadHistory();
+            await loadExecutionHistory();
         });
 
         sqlEditor.addEventListener("input", () => {

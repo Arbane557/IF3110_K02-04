@@ -393,6 +393,158 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	return item, nil
 }
 
+func (s *Service) Rollback(ctx context.Context, databaseID database.DatabaseID, version, userID int64) (Migration, error) {
+	if version <= 0 || userID <= 0 {
+		return Migration{}, ErrInvalidVersion
+	}
+	if s.internalDB == nil {
+		return Migration{}, ErrMigrationStore
+	}
+	item, err := s.Get(ctx, databaseID, version)
+	if err != nil {
+		return Migration{}, err
+	}
+	if !item.Reversible || strings.TrimSpace(item.SQLDown) == "" {
+		return Migration{}, ErrIrreversible
+	}
+	if !item.Active {
+		return Migration{}, ErrMigrationLocked
+	}
+	var latest int64
+	if err := s.internalDB.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(version), 0) FROM migrations WHERE database_id = $1 AND active = TRUE`,
+		databaseID).Scan(&latest); err != nil {
+		return Migration{}, ErrMigrationStore
+	}
+	if latest != version {
+		return Migration{}, ErrNotLatestActive
+	}
+
+	cancelledExecutionID, err := s.latestUncancelledExecution(ctx, databaseID, version)
+	if err != nil {
+		return Migration{}, err
+	}
+	historyID, err := s.startHistory(ctx, databaseID, version, userID, "rollback", item.SQLDown, cancelledExecutionID)
+	if err != nil {
+		return Migration{}, err
+	}
+	pool, err := s.pools.Pool(ctx, databaseID)
+	if err != nil {
+		_ = s.markHistory(ctx, historyID, "failed", err.Error())
+		return Migration{}, err
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		_ = s.markHistory(ctx, historyID, "failed", err.Error())
+		return Migration{}, database.ErrDatabaseUnavailable
+	}
+	if err := lockMigrations(ctx, tx); err != nil {
+		_ = tx.Rollback(ctx)
+		_ = s.markHistory(ctx, historyID, "failed", err.Error())
+		return Migration{}, database.ErrDatabaseUnavailable
+	}
+	if _, err := tx.Exec(ctx, item.SQLDown); err != nil {
+		_ = tx.Rollback(ctx)
+		_ = s.markHistory(ctx, historyID, "failed", err.Error())
+		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
+		return Migration{}, ErrMigrationFailed
+	}
+	if err := tx.Commit(ctx); err != nil {
+		_ = s.markHistory(ctx, historyID, "failed", err.Error())
+		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
+		return Migration{}, database.ErrDatabaseUnavailable
+	}
+	if err := s.markHistory(ctx, historyID, "success", ""); err != nil {
+		return Migration{}, err
+	}
+	if _, err := s.internalDB.ExecContext(ctx, `
+		UPDATE migrations
+		SET status = 'rolled_back', active = FALSE, executed_by = $3, executed_at = NOW(), error_message = NULL
+		WHERE database_id = $1 AND version = $2`, databaseID, version, userID); err != nil {
+		return Migration{}, ErrMigrationStore
+	}
+	item.Status = "rolled_back"
+	item.Active = false
+	item.ExecutedBy = &userID
+	now := time.Now()
+	item.ExecutedAt = &now
+	return item, nil
+}
+
+func (s *Service) Forward(ctx context.Context, databaseID database.DatabaseID, version, userID int64) (Migration, error) {
+	if version <= 0 || userID <= 0 {
+		return Migration{}, ErrInvalidVersion
+	}
+	if s.internalDB == nil {
+		return Migration{}, ErrMigrationStore
+	}
+	item, err := s.Get(ctx, databaseID, version)
+	if err != nil {
+		return Migration{}, err
+	}
+	if item.Active {
+		return Migration{}, ErrMigrationLocked
+	}
+	if item.Status != "success" && item.Status != "rolled_back" && item.Status != "failed" {
+		return Migration{}, ErrMigrationLocked
+	}
+	var latest int64
+	if err := s.internalDB.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(version), 0) FROM migrations WHERE database_id = $1 AND active = TRUE`,
+		databaseID).Scan(&latest); err != nil {
+		return Migration{}, ErrMigrationStore
+	}
+	if version != latest+1 {
+		return Migration{}, ErrForwardNotNext
+	}
+
+	historyID, err := s.startHistory(ctx, databaseID, version, userID, "forward", item.SQL, nil)
+	if err != nil {
+		return Migration{}, err
+	}
+	pool, err := s.pools.Pool(ctx, databaseID)
+	if err != nil {
+		_ = s.markHistory(ctx, historyID, "failed", err.Error())
+		return Migration{}, err
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		_ = s.markHistory(ctx, historyID, "failed", err.Error())
+		return Migration{}, database.ErrDatabaseUnavailable
+	}
+	if err := lockMigrations(ctx, tx); err != nil {
+		_ = tx.Rollback(ctx)
+		_ = s.markHistory(ctx, historyID, "failed", err.Error())
+		return Migration{}, database.ErrDatabaseUnavailable
+	}
+	if _, err := tx.Exec(ctx, item.SQL); err != nil {
+		_ = tx.Rollback(ctx)
+		_ = s.markHistory(ctx, historyID, "failed", err.Error())
+		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
+		return Migration{}, ErrMigrationFailed
+	}
+	if err := tx.Commit(ctx); err != nil {
+		_ = s.markHistory(ctx, historyID, "failed", err.Error())
+		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
+		return Migration{}, database.ErrDatabaseUnavailable
+	}
+	if err := s.markHistory(ctx, historyID, "success", ""); err != nil {
+		return Migration{}, err
+	}
+	if _, err := s.internalDB.ExecContext(ctx, `
+		UPDATE migrations
+		SET status = 'success', active = TRUE, executed_by = $3, executed_at = NOW(), error_message = NULL
+		WHERE database_id = $1 AND version = $2`, databaseID, version, userID); err != nil {
+		return Migration{}, ErrMigrationStore
+	}
+	item.Status = "success"
+	item.Active = true
+	item.ExecutedBy = &userID
+	now := time.Now()
+	item.ExecutedAt = &now
+	return item, nil
+}
+
 func (s *Service) startTrace(
 	ctx context.Context,
 	name string,
@@ -475,6 +627,28 @@ func scanMigration(row rowScanner, optional ...*Migration) (Migration, error) {
 	var item Migration
 	var errorMessage sql.NullString
 	err := row.Scan(&item.Version, &item.SQL, &item.CreatedBy, &item.ExecutedBy, &item.CreatedAt, &item.ExecutedAt, &item.Status, &errorMessage)
+	var sqlDown sql.NullString
+	var irreversibleReason sql.NullString
+	err := row.Scan(
+		&item.Version,
+		&item.SQL,
+		&sqlDown,
+		&item.Reversible,
+		&irreversibleReason,
+		&item.Active,
+		&item.CreatedBy,
+		&item.ExecutedBy,
+		&item.CreatedAt,
+		&item.ExecutedAt,
+		&item.Status,
+		&errorMessage,
+	)
+	if sqlDown.Valid {
+		item.SQLDown = sqlDown.String
+	}
+	if irreversibleReason.Valid {
+		item.IrreversibleReason = irreversibleReason.String
+	}
 	if err == nil && errorMessage.Valid {
 		item.ErrorMessage = errorMessage.String
 	}
@@ -580,4 +754,11 @@ func validateSQL(sqlText string) error {
 		return ErrInvalidSQL
 	}
 	return nil
+}
+
+func nullableString(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }
