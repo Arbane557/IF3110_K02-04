@@ -23,6 +23,9 @@ var (
 	ErrMigrationLocked   = errors.New("migration cannot be changed")
 	ErrMigrationFailed   = errors.New("migration execution failed")
 	ErrMigrationStore    = errors.New("migration store unavailable")
+	ErrIrreversible      = errors.New("migration is irreversible")
+	ErrNotLatestActive   = errors.New("only the latest active migration can be rolled back")
+	ErrForwardNotNext    = errors.New("migration is not the next forward migration")
 )
 
 type Service struct {
@@ -78,8 +81,18 @@ func (s *Service) Get(ctx context.Context, databaseID database.DatabaseID, versi
 }
 
 func (s *Service) Create(ctx context.Context, databaseID database.DatabaseID, userID int64, sqlText string) (Migration, error) {
+	return s.CreateWithDown(ctx, databaseID, userID, sqlText, "", true, "")
+}
+
+func (s *Service) CreateWithDown(ctx context.Context, databaseID database.DatabaseID, userID int64, sqlText, sqlDown string, irreversible bool, irreversibleReason string) (Migration, error) {
 	if err := validateSQL(sqlText); err != nil {
 		return Migration{}, err
+	}
+	if !irreversible && strings.TrimSpace(sqlDown) == "" {
+		return Migration{}, errors.New("reversible migration requires SQL down")
+	}
+	if irreversible && strings.TrimSpace(irreversibleReason) == "" {
+		irreversibleReason = "migration is irreversible"
 	}
 	if s.internalDB == nil {
 		return Migration{}, ErrMigrationStore
@@ -99,9 +112,9 @@ func (s *Service) Create(ctx context.Context, databaseID database.DatabaseID, us
 		return Migration{}, ErrMigrationStore
 	}
 	item, err := scanMigration(tx.QueryRowContext(ctx, `
-		INSERT INTO migrations (database_id, version, sql_text, created_by, status)
-		VALUES ($1, $2, $3, $4, 'draft')
-		RETURNING `+migrationColumns, databaseID, version, sqlText, userID))
+		INSERT INTO migrations (database_id, version, sql_text, sql_down, reversible, irreversible_reason, active, created_by, status)
+		VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, 'draft')
+		RETURNING `+migrationColumns, databaseID, version, sqlText, sqlDown, !irreversible, nullableString(irreversibleReason), userID))
 	if err != nil {
 		return Migration{}, ErrMigrationStore
 	}
@@ -451,7 +464,7 @@ func (s *Service) recordPoolStats(pool *pgxpool.Pool) {
 	s.observer.SetDatabasePool(stats.AcquiredConns(), stats.IdleConns())
 }
 
-const migrationColumns = `version, sql_text, created_by, executed_by, created_at, executed_at, status, error_message`
+const migrationColumns = `version, sql_text, sql_down, reversible, irreversible_reason, active, created_by, executed_by, created_at, executed_at, status, error_message`
 const migrationSelect = `SELECT ` + migrationColumns + ` FROM migrations`
 
 type rowScanner interface {
@@ -532,7 +545,7 @@ func (s *Service) markSuccess(
 	})
 	_, err := s.internalDB.ExecContext(ctx, `
 		UPDATE migrations
-		SET status = 'success', executed_by = $3, executed_at = NOW(), error_message = NULL
+		SET status = 'success', active = TRUE, executed_by = $3, executed_at = NOW(), error_message = NULL
 		WHERE database_id = $1 AND version = $2`, databaseID, version, userID)
 	endTrace(span, err)
 	if err != nil {

@@ -28,13 +28,14 @@
 
         <section>
             <h2>Migration history</h2>
+            <label><input type="checkbox" id="hide-rollback"> Hide rollback</label>
             <div class="table-wrap">
                 <table>
                     <thead>
-                        <tr><th>Version</th><th>Created by</th><th>Executed by</th><th>Time</th><th>Status</th></tr>
+                        <tr><th>Execution</th><th>Version</th><th>Direction</th><th>User</th><th>Time</th><th>Status</th><th>SQL</th></tr>
                     </thead>
                     <tbody id="migration-list">
-                        <tr><td colspan="5">Select a database to load migration history.</td></tr>
+                        <tr><td colspan="7">Select a database to load migration history.</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -45,11 +46,17 @@
             <p id="editor-help">Select a migration to view its SQL.</p>
             <label for="migration-sql">SQL</label>
             <textarea id="migration-sql" rows="14" spellcheck="false" placeholder="Select a migration or start a new draft." readonly></textarea>
+            <label for="migration-down-sql">SQL Down (leave empty if irreversible)</label>
+            <textarea id="migration-down-sql" rows="6" spellcheck="false" placeholder="SQL to roll back this migration." readonly></textarea>
+            <label for="irreversible-reason">Irreversible reason</label>
+            <input id="irreversible-reason" type="text" placeholder="Required when no SQL down is provided" readonly>
             <div class="migration-actions">
                 <button id="new-migration" type="button" hidden>New draft</button>
                 <button id="save-migration" type="button" hidden disabled>Save draft</button>
                 <button id="preview-plan" type="button" hidden disabled>Preview plan</button>
                 <button id="execute-migration" type="button" hidden disabled>Execute migration</button>
+                <button id="rollback-migration" type="button" hidden disabled>Rollback migration</button>
+                <button id="forward-migration" type="button" hidden disabled>Forward migration</button>
             </div>
             <p id="editor-status" class="status" role="status" aria-live="polite"></p>
             <section id="plan-section" hidden>
@@ -69,11 +76,18 @@
         const saveButton = document.querySelector("#save-migration");
         const previewButton = document.querySelector("#preview-plan");
         const executeButton = document.querySelector("#execute-migration");
+        const rollbackButton = document.querySelector("#rollback-migration");
+        const forwardButton = document.querySelector("#forward-migration");
+        const downSqlEditor = document.querySelector("#migration-down-sql");
+        const irreversibleReason = document.querySelector("#irreversible-reason");
+        const hideRollback = document.querySelector("#hide-rollback");
         const planSection = document.querySelector("#plan-section");
         const planOutput = document.querySelector("#plan-output");
         let currentDatabase = null;
         let currentVersion = null;
         let currentStatus = "";
+        let currentActive = false;
+        let currentReversible = false;
         let migrations = [];
 
         async function requestJSON(url, options = {}) {
@@ -90,10 +104,16 @@
             const canEdit = currentDatabase?.accessLevel === "edit";
             const isDraft = currentVersion === null || currentStatus === "draft";
             sqlEditor.readOnly = !canEdit || !isDraft;
+            downSqlEditor.readOnly = !canEdit || !isDraft;
+            irreversibleReason.readOnly = !canEdit || !isDraft;
             newButton.hidden = !canEdit;
             saveButton.hidden = !canEdit;
             previewButton.hidden = !canEdit || !isDraft;
             executeButton.hidden = !canEdit || currentVersion === null || currentStatus !== "draft";
+            rollbackButton.hidden = !canEdit || currentVersion === null;
+            rollbackButton.disabled = !canEdit || currentStatus !== "success" || !currentActive || !currentReversible;
+            forwardButton.hidden = !canEdit || currentVersion === null;
+            forwardButton.disabled = !canEdit || currentActive || currentStatus === "draft" || currentStatus === "running";
             saveButton.disabled = !canEdit || !isDraft || !sqlEditor.value.trim();
             previewButton.disabled = !canEdit || !isDraft || !sqlEditor.value.trim();
             executeButton.disabled = !canEdit || currentVersion === null || currentStatus !== "draft";
@@ -102,6 +122,8 @@
         function resetEditor() {
             currentVersion = null;
             currentStatus = "";
+            currentActive = false;
+            currentReversible = false;
             sqlEditor.value = "";
             editorHelp.textContent = currentDatabase?.accessLevel === "edit"
                 ? "Select a migration or start a new draft."
@@ -155,7 +177,11 @@
                 const migration = await requestJSON(`/api/databases/${currentDatabase.id}/migrations/${version}`);
                 currentVersion = migration.version;
                 currentStatus = migration.status;
+                currentActive = migration.active;
+                currentReversible = migration.reversible;
                 sqlEditor.value = migration.sql;
+                downSqlEditor.value = migration.sqlDown || "";
+                irreversibleReason.value = migration.irreversibleReason || "";
                 planSection.hidden = true;
                 planOutput.textContent = "";
                 editorHelp.textContent = `Version ${migration.version} - ${migration.status}`;
@@ -222,7 +248,12 @@
                 const migration = await requestJSON(url, {
                     method: isUpdate ? "PUT" : "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ sql: sqlEditor.value }),
+                    body: JSON.stringify({
+                        sql: sqlEditor.value,
+                        sqlDown: downSqlEditor.value,
+                        irreversible: !downSqlEditor.value.trim(),
+                        irreversibleReason: irreversibleReason.value,
+                    }),
                 });
                 currentVersion = migration.version;
                 currentStatus = migration.status;
