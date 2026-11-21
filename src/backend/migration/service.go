@@ -182,6 +182,7 @@ func (s *Service) Explain(ctx context.Context, databaseID database.DatabaseID, s
 
 func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, version, userID int64) (result Migration, err error) {
 	startedAt := time.Now()
+	var historyID int64
 
 	// Full migration
 	ctx, executionSpan := s.startTrace(ctx, observability.SpanMigrationExecute, observability.Fields{
@@ -203,6 +204,13 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 			"migration.version":   version,
 			"migration.direction": "up",
 			"duration_ms":         time.Since(startedAt).Milliseconds(),
+		}
+		if historyID != 0 {
+			if err != nil {
+				_ = s.markHistory(ctx, historyID, "failed", err.Error())
+			} else {
+				_ = s.markHistory(ctx, historyID, "success", "")
+			}
 		}
 		if err != nil {
 			fields["error"] = err.Error()
@@ -244,6 +252,10 @@ func (s *Service) Execute(ctx context.Context, databaseID database.DatabaseID, v
 	})
 	item, err := s.startExecution(startContext, databaseID, version, userID)
 	endTrace(startSpan, err)
+	if err != nil {
+		return Migration{}, err
+	}
+	historyID, err = s.startHistory(ctx, databaseID, version, userID, "up", item.SQL, nil)
 	if err != nil {
 		return Migration{}, err
 	}
@@ -626,7 +638,6 @@ type rowScanner interface {
 func scanMigration(row rowScanner, optional ...*Migration) (Migration, error) {
 	var item Migration
 	var errorMessage sql.NullString
-	err := row.Scan(&item.Version, &item.SQL, &item.CreatedBy, &item.ExecutedBy, &item.CreatedAt, &item.ExecutedAt, &item.Status, &errorMessage)
 	var sqlDown sql.NullString
 	var irreversibleReason sql.NullString
 	err := row.Scan(

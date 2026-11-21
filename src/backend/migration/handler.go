@@ -110,6 +110,49 @@ func (h *Handler) ExecuteMigration(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (h *Handler) RollbackMigration(w http.ResponseWriter, r *http.Request) {
+	id, principal, ok := h.authorize(w, r, auth.ActionEdit)
+	if !ok {
+		return
+	}
+	version, ok := parseVersion(w, r)
+	if !ok {
+		return
+	}
+	item, err := h.service.Rollback(r.Context(), id, version, principal.UserID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (h *Handler) ForwardMigration(w http.ResponseWriter, r *http.Request) {
+	id, principal, ok := h.authorize(w, r, auth.ActionEdit)
+	if !ok {
+		return
+	}
+	version, ok := parseVersion(w, r)
+	if !ok {
+		return
+	}
+	item, err := h.service.Forward(r.Context(), id, version, principal.UserID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (h *Handler) ListHistory(w http.ResponseWriter, r *http.Request) {
+	id, _, ok := h.authorize(w, r, auth.ActionView)
+	if !ok {
+		return
+	}
+	hideRollback := r.URL.Query().Get("hideRollback") == "true"
+	items, err := h.service.ListHistory(r.Context(), id, hideRollback)
+	if err != nil {
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
