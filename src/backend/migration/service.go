@@ -458,12 +458,10 @@ func (s *Service) Rollback(ctx context.Context, databaseID database.DatabaseID, 
 	if _, err := tx.Exec(ctx, item.SQLDown); err != nil {
 		_ = tx.Rollback(ctx)
 		_ = s.markHistory(ctx, historyID, "failed", err.Error())
-		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
 		return Migration{}, ErrMigrationFailed
 	}
 	if err := tx.Commit(ctx); err != nil {
 		_ = s.markHistory(ctx, historyID, "failed", err.Error())
-		_ = s.markFailed(ctx, databaseID, version, userID, err.Error())
 		return Migration{}, database.ErrDatabaseUnavailable
 	}
 	if err := s.markHistory(ctx, historyID, "success", ""); err != nil {
@@ -558,6 +556,144 @@ func (s *Service) Forward(ctx context.Context, databaseID database.DatabaseID, v
 }
 
 func (s *Service) ListHistory(ctx context.Context, databaseID database.DatabaseID, hideRollback bool) ([]HistoryEntry, error) {
+	if s.internalDB == nil {
+		return nil, ErrMigrationStore
+	}
+	rows, err := s.internalDB.QueryContext(ctx, `
+		SELECT execution_id, version, user_id, direction, status, sql_text,
+		       execution_started_at, executed_at, error_message, cancelled_execution_id
+		FROM migration_history
+		WHERE database_id = $1
+		ORDER BY execution_id DESC`, databaseID)
+	if err != nil {
+		return nil, ErrMigrationStore
+	}
+	defer rows.Close()
+	result := make([]HistoryEntry, 0)
+	hidden := make(map[int64]bool)
+	for rows.Next() {
+		var item HistoryEntry
+		var executedAt sql.NullTime
+		var errorMessage sql.NullString
+		var cancelled sql.NullInt64
+		if err := rows.Scan(
+			&item.ExecutionID,
+			&item.Version,
+			&item.UserID,
+			&item.Direction,
+			&item.Status,
+			&item.SQL,
+			&item.StartedAt,
+			&executedAt,
+			&errorMessage,
+			&cancelled,
+		); err != nil {
+			return nil, ErrMigrationStore
+		}
+		if executedAt.Valid {
+			item.ExecutedAt = &executedAt.Time
+		}
+		if errorMessage.Valid {
+			item.ErrorMessage = errorMessage.String
+		}
+		if cancelled.Valid {
+			item.CancelledExecutionID = &cancelled.Int64
+		}
+		if hideRollback && item.Direction == "rollback" && item.Status == "success" && cancelled.Valid {
+			hidden[item.CancelledExecutionIDValue()] = true
+		}
+		result = append(result, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, ErrMigrationStore
+	}
+	if !hideRollback {
+		return result, nil
+	}
+	filtered := make([]HistoryEntry, 0, len(result))
+	for _, item := range result {
+		if hidden[item.ExecutionID] {
+			continue
+		}
+		if item.Direction == "rollback" && item.Status == "success" && item.CancelledExecutionID != nil {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, nil
+}
+
+func (s *Service) History(ctx context.Context, databaseID database.DatabaseID, hideRollback bool) ([]HistoryEntry, error) {
+	return s.ListHistory(ctx, databaseID, hideRollback)
+}
+
+func (h HistoryEntry) CancelledExecutionIDValue() int64 {
+	if h.CancelledExecutionID == nil {
+		return 0
+	}
+	return *h.CancelledExecutionID
+}
+
+func (s *Service) latestUncancelledExecution(ctx context.Context, databaseID database.DatabaseID, version int64) (*int64, error) {
+	var executionID int64
+	err := s.internalDB.QueryRowContext(ctx, `
+		SELECT h.execution_id
+		FROM migration_history h
+		WHERE h.database_id = $1 AND h.version = $2
+		  AND h.status = 'success'
+		  AND h.direction IN ('up', 'forward')
+		  AND NOT EXISTS (
+		      SELECT 1 FROM migration_history r
+		      WHERE r.cancelled_execution_id = h.execution_id
+		        AND r.status = 'success'
+		  )
+		ORDER BY h.execution_id DESC
+		LIMIT 1`, databaseID, version).Scan(&executionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, ErrMigrationStore
+	}
+	return &executionID, nil
+}
+
+func (s *Service) startHistory(
+	ctx context.Context,
+	databaseID database.DatabaseID,
+	version, userID int64,
+	direction, sqlText string,
+	cancelledExecutionID *int64,
+) (int64, error) {
+	var executionID int64
+	err := s.internalDB.QueryRowContext(ctx, `
+		INSERT INTO migration_history
+		    (database_id, version, user_id, direction, status, sql_text, cancelled_execution_id)
+		VALUES ($1, $2, $3, $4, 'running', $5, $6)
+		RETURNING execution_id`,
+		databaseID, version, userID, direction, sqlText, cancelledExecutionID,
+	).Scan(&executionID)
+	if err != nil {
+		return 0, ErrMigrationStore
+	}
+	return executionID, nil
+}
+
+func (s *Service) markHistory(ctx context.Context, executionID int64, status, errorMessage string) error {
+	_, err := s.internalDB.ExecContext(ctx, `
+		UPDATE migration_history
+		SET status = $2,
+		    executed_at = NOW(),
+		    error_message = NULLIF($3, '')
+		WHERE execution_id = $1`,
+		executionID, status, errorMessage,
+	)
+	if err != nil {
+		return ErrMigrationStore
+	}
+	return nil
+}
+
 func (s *Service) startTrace(
 	ctx context.Context,
 	name string,
@@ -657,6 +793,7 @@ func scanMigration(row rowScanner, optional ...*Migration) (Migration, error) {
 	)
 	if sqlDown.Valid {
 		item.SQLDown = sqlDown.String
+		item.DownSQL = sqlDown.String
 	}
 	if irreversibleReason.Valid {
 		item.IrreversibleReason = irreversibleReason.String
