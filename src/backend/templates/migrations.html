@@ -194,6 +194,40 @@
             }
         }
 
+        async function loadExecutionHistory() {
+            if (!currentDatabase) return;
+            try {
+                const entries = await requestJSON(
+                    `/api/databases/${currentDatabase.id}/migrations/history?hideRollback=${hideRollback.checked}`,
+                );
+                migrationList.replaceChildren();
+                if (entries.length === 0) {
+                    migrationList.innerHTML = '<tr><td colspan="7">No migration attempts yet.</td></tr>';
+                    return;
+                }
+                for (const entry of entries) {
+                    const row = document.createElement("tr");
+                    const values = [
+                        entry.executionId,
+                        entry.version,
+                        entry.direction,
+                        entry.userId,
+                        new Date(entry.executedAt || entry.startedAt).toLocaleString(),
+                        entry.status,
+                        entry.sql,
+                    ];
+                    for (const value of values) {
+                        const cell = document.createElement("td");
+                        cell.textContent = value ?? "-";
+                        row.append(cell);
+                    }
+                    migrationList.append(row);
+                }
+            } catch (error) {
+                migrationStatus.textContent = error.message;
+            }
+        }
+
         async function loadDatabases() {
             try {
                 const databases = await requestJSON("/api/databases");
@@ -235,6 +269,8 @@
             planSection.hidden = true;
             updateEditorControls();
         });
+
+        hideRollback.addEventListener("change", loadExecutionHistory);
 
         newButton.addEventListener("click", () => {
             resetEditor();
@@ -310,6 +346,43 @@
             await loadHistory();
             await loadMigration(version);
             if (successMessage) editorStatus.textContent = successMessage;
+            await loadExecutionHistory();
+        });
+
+        rollbackButton.addEventListener("click", async () => {
+            if (!currentDatabase || currentVersion === null) return;
+            if (!confirm(`Rollback migration ${currentVersion}?`)) return;
+            rollbackButton.disabled = true;
+            try {
+                await requestJSON(
+                    `/api/databases/${currentDatabase.id}/migrations/${currentVersion}/rollback`,
+                    { method: "POST" },
+                );
+                editorStatus.textContent = `Migration ${currentVersion} rolled back.`;
+            } catch (error) {
+                editorStatus.textContent = error.message;
+            }
+            await loadHistory();
+            await loadMigration(currentVersion);
+            await loadExecutionHistory();
+        });
+
+        forwardButton.addEventListener("click", async () => {
+            if (!currentDatabase || currentVersion === null) return;
+            if (!confirm(`Forward migration ${currentVersion}?`)) return;
+            forwardButton.disabled = true;
+            try {
+                await requestJSON(
+                    `/api/databases/${currentDatabase.id}/migrations/${currentVersion}/forward`,
+                    { method: "POST" },
+                );
+                editorStatus.textContent = `Migration ${currentVersion} forwarded.`;
+            } catch (error) {
+                editorStatus.textContent = error.message;
+            }
+            await loadHistory();
+            await loadMigration(currentVersion);
+            await loadExecutionHistory();
         });
 
         fetch("/whoami").then(response => response.json()).then(user => {

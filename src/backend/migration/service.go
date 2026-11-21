@@ -557,6 +557,7 @@ func (s *Service) Forward(ctx context.Context, databaseID database.DatabaseID, v
 	return item, nil
 }
 
+func (s *Service) ListHistory(ctx context.Context, databaseID database.DatabaseID, hideRollback bool) ([]HistoryEntry, error) {
 func (s *Service) startTrace(
 	ctx context.Context,
 	name string,
