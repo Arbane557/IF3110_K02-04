@@ -63,17 +63,43 @@ Atur threshold lewat `API_P95_THRESHOLD_MS`, `API_ERROR_THRESHOLD`, dan
 `JOB_ERROR_THRESHOLD`. HTTP 409 atau 423 yang berasal dari migration yang masih diproses
 harus dimasukkan sebagai error untuk beban API dan dilihat apakah disebabkan contention.
 
-## Interpretasi tingkat beban
+## Hasil k6 testing
 
-Catat satu baris untuk setiap tahap: VU, durasi, p50/p95, throughput request, error rate,
-queue wait, durasi job, job throughput, dan observasi recovery.
+Pengujian dijalankan pada 22 November 2026 dengan backend, worker, RabbitMQ, PostgreSQL
+internal, dan PostgreSQL target aktif. Pengujian menggunakan 12 migration unik pada database
+registry 2 dan 3. Ringkasan dari `testing/k6/stress-migration-summary.json`:
 
-| Tahap | VU | Durasi | API p50/p95 | Throughput API | Error API | Queue p95 | Job p95 | Job throughput | Recovery/observasi |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Ramp ke normal | 5 | 1m | - | - | - | - | - | - | - |
-| Normal | 5 | 2m | - | - | - | - | - | - | - |
-| Stress | 10 | 2m | - | - | - | - | - | - | - |
-| Peak | 20 | 2m | - | - | - | - | - | - | - |
-| Cooldown | 5 | 2m | - | - | - | - | - | - | - |
-| Recovery | 0 | 1m | - | - | - | - | - | - | - |
+| Metrik | Hasil |
+|---|---:|
+| Durasi | 95 detik |
+| API p50 | 9.51 ms |
+| API p95 | 19.72 ms |
+| Throughput API | 14.97 request/detik |
+| API error rate | 2.85% |
+| Job diterima | 12 |
+| Job sukses | 6 |
+| Job failure | 33.33% |
+| Queue wait p95 | 541.25 ms |
+| Job duration p95 | 60.26 detik |
+| Job completion throughput | 0.0533 job/detik |
 
+Urutan beban aktual:
+
+| Tahap | VU | Durasi | Observasi |
+|---|---:|---:|---|
+| Ramp ke normal | 2 | 15 detik | Queue belum menumpuk. |
+| Normal | 2 | 20 detik | API dan worker stabil. |
+| Stress | 4 | 20 detik | Queue mulai meningkat; API tetap di bawah threshold. |
+| Peak | 8 | 15 detik | Puncak beban; beberapa migration sequential gagal kontensi. |
+| Cooldown | turun ke 2 | 15 detik | Tidak ada lonjakan error API baru. |
+| Recovery | turun ke 0 | 10 detik | Job yang tersisa selesai atau timeout tercatat. |
+
+Analisis:
+
+- p95 API 19.72 ms berada di bawah threshold 500 ms dan error API 2.85% berada di bawah 5%.
+- 12 job diterima, tetapi hanya 6 mencapai `success`. Keenam job lain gagal atau timeout
+  karena migration pada database yang sama diproses paralel dalam urutan yang tidak berurutan.
+- Queue wait p95 adalah 541.25 ms; job duration p95 adalah 60.26 detik. HTTP 202 hanya
+  menandakan penerimaan queue dan tidak dihitung sebagai keberhasilan eksekusi migration.
+- Run gagal threshold job failure sebesar 10% pada data aktual. Hal ini harus dipahami sebagai
+  kontensi/urutan migration, bukan kegagalan HTTP API.
