@@ -1,7 +1,11 @@
 package observability
 
 import (
+	"net/http"
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type prometheusMetrics struct {
@@ -11,10 +15,29 @@ type prometheusMetrics struct {
 	batchDuration       *prometheus.HistogramVec
 	rowsProcessed       *prometheus.CounterVec
 	poolConnections     *prometheus.GaugeVec
+	queueWait           prometheus.Histogram
+	lockWait            prometheus.Histogram
+	poolWait            *prometheus.HistogramVec
+	retries             prometheus.Counter
 }
 
 func newPrometheusMetrics(registerer prometheus.Registerer) *prometheusMetrics {
 	metrics := &prometheusMetrics{
+		queueWait: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "migration_queue_wait_seconds", Help: "Time from queue eligibility to starting an execution attempt, including lock contention.",
+			Buckets: []float64{0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 300},
+		}),
+		lockWait: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "migration_lock_wait_seconds", Help: "Elapsed target advisory lock acquisition time, including deferred deliveries.",
+			Buckets: []float64{0.001, 0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60},
+		}),
+		poolWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "database_pool_acquire_seconds", Help: "Target connection acquisition latency, including waiting and connection establishment.",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30},
+		}, []string{"status"}),
+		retries: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "migration_retries_total", Help: "Retry or recovery attempts actually started by this process.",
+		}),
 		migrationExecutions: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "migration_executions_total",
 			Help: "Total migration execution attempts.",
@@ -50,6 +73,10 @@ func newPrometheusMetrics(registerer prometheus.Registerer) *prometheusMetrics {
 		metrics.batchDuration,
 		metrics.rowsProcessed,
 		metrics.poolConnections,
+		metrics.queueWait,
+		metrics.lockWait,
+		metrics.poolWait,
+		metrics.retries,
 	)
 	return metrics
 }
@@ -82,4 +109,32 @@ func (s *Service) RecordBatch(result BatchResult) {
 
 func (s *Service) SetDatabasePool(active, idle int32) {
 	s.metrics.setDatabasePool(active, idle)
+}
+
+func (s *Service) RecordQueueWait(duration time.Duration) {
+	s.metrics.queueWait.Observe(max(duration.Seconds(), 0))
+}
+
+func (s *Service) RecordLockWait(duration time.Duration) {
+	s.metrics.lockWait.Observe(max(duration.Seconds(), 0))
+}
+
+func (s *Service) RecordPoolWait(duration time.Duration, failed bool) {
+	status := "success"
+	if failed {
+		status = "failed"
+	}
+	s.metrics.poolWait.WithLabelValues(status).Observe(max(duration.Seconds(), 0))
+}
+
+func (s *Service) RecordRetry() { s.metrics.retries.Inc() }
+
+// Refresh aggregate target gauges at scrape time, including when no migration runs.
+func (s *Service) MetricsHandler(gatherer prometheus.Gatherer, poolStats func() (int32, int32)) http.Handler {
+	next := promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		active, idle := poolStats()
+		s.SetDatabasePool(active, idle)
+		next.ServeHTTP(w, r)
+	})
 }

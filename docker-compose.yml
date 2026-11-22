@@ -27,6 +27,8 @@ services:
     build: ./src/backend
     command: ["/app/backend", "worker"]
     restart: unless-stopped
+    expose:
+      - "9091"
     environment:
       CREDENTIAL_ENCRYPTION_KEY: "${CREDENTIAL_ENCRYPTION_KEY:?Set CREDENTIAL_ENCRYPTION_KEY in .env}"
       DATABASE_URL: postgres://app:secret@database:5432/app?sslmode=disable
@@ -141,6 +143,7 @@ services:
       - "9090:9090"
     depends_on:
       - backend
+      - worker
 
   tempo:
     image: grafana/tempo:2.7.2
@@ -162,6 +165,7 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
       - "3000:3000"
     depends_on:

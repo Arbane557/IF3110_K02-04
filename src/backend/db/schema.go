@@ -9,6 +9,9 @@ import (
 //go:embed init/005_migration_jobs.sql
 var migrationJobs string
 
+//go:embed init/006_migration_metrics.sql
+var migrationMetrics string
+
 // InstallMigrationJobs upgrades both fresh and existing platform databases.
 func InstallMigrationJobs(ctx context.Context, database *sql.DB) error {
 	tx, err := database.BeginTx(ctx, nil)
@@ -20,6 +23,9 @@ func InstallMigrationJobs(ctx context.Context, database *sql.DB) error {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, migrationJobs); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, migrationMetrics); err != nil {
 		return err
 	}
 	return tx.Commit()

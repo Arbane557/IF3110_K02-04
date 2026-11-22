@@ -67,6 +67,14 @@ func (s *Service) runJob(ctx context.Context, job Job) error {
 	if err != nil {
 		return s.unavailableJob(ctx, job)
 	}
+	lockStarted, err := s.beginLockWait(ctx, job)
+	if err != nil {
+		conn.Release()
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
 
 	lockCtx, span := s.startTrace(ctx, "migration.target.lock", job.fields())
 	var locked bool
@@ -81,6 +89,9 @@ func (s *Service) runJob(ctx context.Context, job Job) error {
 		return s.deferJob(ctx, job)
 	}
 	defer closeJobConnection(conn)
+	if err := s.finishLockWait(ctx, job, lockStarted); err != nil {
+		return err
+	}
 	job, err = s.GetJob(ctx, job.DatabaseID, job.ID)
 	if errors.Is(err, errJobNotFound) {
 		return nil
@@ -262,13 +273,21 @@ func (s *Service) startAttempt(ctx context.Context, j Job) (Job, error) {
 	}
 	j.Status = "running"
 	j.attempts++
-	_, err = tx.ExecContext(ctx, `UPDATE migration_jobs SET status='running',blocks_database=true,execution_id=$2,attempts=$3 WHERE id=$1`,
-		j.ID, j.execution, j.attempts)
+	var queueSeconds float64
+	err = tx.QueryRowContext(ctx, `UPDATE migration_jobs SET status='running',blocks_database=true,execution_id=$2,attempts=$3 WHERE id=$1
+        RETURNING GREATEST(EXTRACT(EPOCH FROM clock_timestamp()-queued_at),0)::double precision`,
+		j.ID, j.execution, j.attempts).Scan(&queueSeconds)
 	if err != nil {
 		return j, err
 	}
 	if err = tx.Commit(); err != nil {
 		return j, err
+	}
+	if s.observer != nil {
+		s.observer.RecordQueueWait(time.Duration(queueSeconds * float64(time.Second)))
+		if j.attempts > 1 || j.generation > 1 {
+			s.observer.RecordRetry()
+		}
 	}
 	fields := j.fields()
 	fields["status"] = "running"
@@ -400,15 +419,27 @@ func (s *Service) finishJob(ctx context.Context, j Job, status, message string, 
 		block = true
 		delay = 1 << j.attempts
 	}
+	var startedAt sql.NullTime
+	if s.observer != nil && j.execution.Valid && status != "uncertain" {
+		if err := tx.QueryRowContext(ctx, `SELECT execution_started_at FROM migration_history WHERE execution_id=$1`, j.execution).Scan(&startedAt); err != nil {
+			return err
+		}
+	}
 	_, err = tx.ExecContext(ctx, `UPDATE migration_jobs SET status=$2,error_message=$3,batches_done=$4,rows_done=$5,
       blocks_database=$6,published_at=NULL,available_at=now()+$7*interval '1 second',
+      queued_at=CASE WHEN $9 THEN clock_timestamp()+$7*interval '1 second' ELSE queued_at END,
       execution_id=CASE WHEN $8 THEN execution_id ELSE NULL END WHERE id=$1`,
-		j.ID, next, message, j.BatchesDone, j.RowsDone, block, delay, status == "uncertain" || status == "success")
+		j.ID, next, message, j.BatchesDone, j.RowsDone, block, delay, status == "uncertain" || status == "success", next == "pending")
 	if err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
+	}
+	if startedAt.Valid {
+		s.observer.RecordMigration(observability.MigrationResult{
+			Direction: j.Direction, Status: historyStatus, Duration: time.Since(startedAt.Time),
+		})
 	}
 	fields := j.fields()
 	fields["status"], fields["query"], fields["error"] = next, sqlForLog(j.query), message

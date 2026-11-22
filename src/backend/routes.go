@@ -2,6 +2,12 @@ package main
 
 import "net/http"
 
+func workerMetricsRoutes(metrics http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", metrics)
+	return mux
+}
+
 func (app *App) routes() http.Handler {
 	mux := http.NewServeMux()
 	app.registerPageRoutes(mux)

@@ -222,7 +222,7 @@ func (s *Service) ApproveJob(ctx context.Context, db database.DatabaseID, id, ac
 		return Job{}, err
 	}
 	if complete {
-		if _, err = tx.ExecContext(ctx, `UPDATE migration_jobs SET status='pending',published_at=NULL,available_at=now() WHERE id=$1`, id); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE migration_jobs SET status='pending',published_at=NULL,available_at=now(),queued_at=now() WHERE id=$1`, id); err != nil {
 			return Job{}, err
 		}
 		job.Status = "pending"
@@ -238,7 +238,7 @@ func (s *Service) RecoverJob(ctx context.Context, db database.DatabaseID, id, ac
        sql_text=CASE WHEN $4 THEN sql_down ELSE sql_text END,execution_id=CASE WHEN status='uncertain' THEN execution_id END,
        status=CASE WHEN EXISTS(SELECT 1 FROM group_database_permissions WHERE database_id=$1)
            THEN 'pending_review' ELSE 'pending' END,
-       generation=generation+1, attempts=0, error_message='', available_at=now(), published_at=NULL,
+       generation=generation+1, attempts=0, error_message='', available_at=now(), queued_at=now(),lock_wait_started_at=NULL,published_at=NULL,
        traceparent=$5,tracestate=$6
        WHERE database_id=$1 AND id=$2 AND
        ( (NOT $4 AND status IN ('partial','partially_reverted','uncertain'))

@@ -21,6 +21,10 @@ type MetricsRecorder interface {
 	RecordMigration(MigrationResult)
 	RecordBatch(BatchResult)
 	SetDatabasePool(active, idle int32)
+	RecordQueueWait(time.Duration)
+	RecordLockWait(time.Duration)
+	RecordPoolWait(time.Duration, bool)
+	RecordRetry()
 }
 
 type Logger interface {

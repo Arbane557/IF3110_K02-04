@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"wbd/backend/observability"
 )
 
 const targetMetadata = `
@@ -171,6 +172,21 @@ func (s *Service) saveProgress(ctx context.Context, conn *pgxpool.Conn, j Job) e
 
 func (s *Service) commitStep(ctx context.Context, conn *pgxpool.Conn, j Job, batch int64, ids []int64,
 	restore *string, table, expected string, markerOnly bool) (err error) {
+	started := time.Now()
+	var affected int64
+	defer func() {
+		if s.observer == nil || markerOnly {
+			return
+		}
+		status, committedRows := "success", affected
+		if err != nil {
+			status, committedRows = "failed", 0
+			if errors.Is(err, errCommitUnknown) {
+				status = "uncertain"
+			}
+		}
+		s.observer.RecordBatch(observability.BatchResult{Status: status, Duration: time.Since(started), RowsAffected: committedRows})
+	}()
 	fields := j.fields()
 	fields["batch"] = batch
 	ctx, span := s.startTrace(ctx, "migration.batch", fields)
@@ -194,7 +210,6 @@ func (s *Service) commitStep(ctx context.Context, conn *pgxpool.Conn, j Job, bat
 			return errCompensation
 		}
 	}
-	var affected int64
 	if !markerOnly {
 		var parameters []any
 		if table != "" {

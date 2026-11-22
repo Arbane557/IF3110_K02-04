@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,7 +17,6 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"wbd/backend/auth"
 	"wbd/backend/database"
@@ -69,11 +69,11 @@ func main() {
 		log.Fatal("create credential protector:", err)
 	}
 	registryRepository := database.NewPostgresRegistryRepository(internalDB)
-	connectionManager := database.NewConnectionManager(registryRepository, protector)
 	metricsRegistry := prometheus.NewRegistry()
 	metricsRegistry.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+		collectors.NewDBStatsCollector(internalDB, "platform"),
 	)
 	tracerContext, cancelTracerContext := context.WithTimeout(context.Background(), 10*time.Second)
 	tracerProvider, err := observability.NewTracerProvider(tracerContext)
@@ -85,6 +85,8 @@ func main() {
 		metricsRegistry,
 		tracerProvider.Tracer("wbd/backend"),
 	)
+	connectionManager := database.NewConnectionManager(registryRepository, protector, observabilityService)
+	metricsHandler := observabilityService.MetricsHandler(metricsRegistry, connectionManager.PoolStats)
 	access := auth.NewAccessService(internalDB)
 	registry := database.NewRegistryService(registryRepository, connectionManager, protector)
 	catalog := database.NewCatalogService(connectionManager)
@@ -98,12 +100,29 @@ func main() {
 		}
 		workerCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		listener, err := net.Listen("tcp", ":9091")
+		if err != nil {
+			log.Fatal("listen worker metrics:", err)
+		}
+		metricsServer := &http.Server{
+			Handler: workerMetricsRoutes(metricsHandler),
+			ReadHeaderTimeout: 5 * time.Second,
+			WriteTimeout: 10 * time.Second,
+		}
+		go func() {
+			if err := metricsServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+				log.Print("worker metrics server stopped: ", err)
+				stop()
+			}
+		}()
 		migrationService.RunWorker(workerCtx, brokerURL, 4)
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelShutdown()
+		_ = metricsServer.Shutdown(shutdownCtx)
 		_ = tracerProvider.Shutdown(shutdownCtx)
 		return
 	}
+	metricsRegistry.MustRegister(migration.NewJobCollector(internalDB))
 
 	templates, err := template.ParseGlob("templates/*.html")
 	if err != nil {
@@ -113,7 +132,7 @@ func main() {
 		Auth:      auth.NewHandler(auth.NewService(internalDB, protector), templates),
 		Database:  database.NewHandler(registry, catalog, access, templates),
 		Migration: migration.NewHandler(templates, migrationService, access),
-		Metrics:   promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{}),
+		Metrics:   metricsHandler,
 	}
 
 	server := &http.Server{
