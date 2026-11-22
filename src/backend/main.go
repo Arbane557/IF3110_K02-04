@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -18,6 +20,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"wbd/backend/auth"
 	"wbd/backend/database"
+	"wbd/backend/db"
 	"wbd/backend/migration"
 	"wbd/backend/observability"
 )
@@ -51,9 +54,11 @@ func main() {
 		log.Fatal("connect database:", err)
 	}
 
-	templates, err := template.ParseGlob("templates/*.html")
+	upgradeCtx, cancelUpgrade := context.WithTimeout(context.Background(), 30*time.Second)
+	err = db.InstallMigrationJobs(upgradeCtx, internalDB)
+	cancelUpgrade()
 	if err != nil {
-		log.Fatal("parse templates:", err)
+		log.Fatal("install migration job schema:", err)
 	}
 	key, err := hex.DecodeString(os.Getenv("CREDENTIAL_ENCRYPTION_KEY"))
 	if err != nil || len(key) != 32 {
@@ -85,14 +90,31 @@ func main() {
 	catalog := database.NewCatalogService(connectionManager)
 	migrationService := migration.NewService(internalDB, connectionManager, observabilityService)
 
+	defer connectionManager.Close()
+	if len(os.Args) == 2 && os.Args[1] == "worker" {
+		brokerURL := os.Getenv("RABBITMQ_URL")
+		if brokerURL == "" {
+			log.Fatal("RABBITMQ_URL is required in worker mode")
+		}
+		workerCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		migrationService.RunWorker(workerCtx, brokerURL, 4)
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelShutdown()
+		_ = tracerProvider.Shutdown(shutdownCtx)
+		return
+	}
+
+	templates, err := template.ParseGlob("templates/*.html")
+	if err != nil {
+		log.Fatal("parse templates:", err)
+	}
 	app := &App{
 		Auth:      auth.NewHandler(auth.NewService(internalDB, protector), templates),
 		Database:  database.NewHandler(registry, catalog, access, templates),
 		Migration: migration.NewHandler(templates, migrationService, access),
 		Metrics:   promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{}),
 	}
-
-	defer connectionManager.Close()
 
 	server := &http.Server{
 		Addr: ":6969",

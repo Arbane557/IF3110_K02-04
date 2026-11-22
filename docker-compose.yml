@@ -16,6 +16,39 @@ services:
       otel-collector:
         condition: service_started
 
+  worker:
+    build: ./src/backend
+    command: ["/app/backend", "worker"]
+    restart: unless-stopped
+    environment:
+      CREDENTIAL_ENCRYPTION_KEY: "${CREDENTIAL_ENCRYPTION_KEY:?Set CREDENTIAL_ENCRYPTION_KEY in .env}"
+      DATABASE_URL: postgres://app:secret@database:5432/app?sslmode=disable
+      RABBITMQ_URL: amqp://migration:migration@rabbitmq:5672/
+      OTEL_SERVICE_NAME: wbd-migration-worker
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+    depends_on:
+      database:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  rabbitmq:
+    image: rabbitmq:4.1
+    environment:
+      RABBITMQ_DEFAULT_USER: migration
+      RABBITMQ_DEFAULT_PASS: migration
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq.conf:/etc/rabbitmq/conf.d/20-worker.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
   database:
     image: postgres:17
     ports:
@@ -94,6 +127,7 @@ services:
       - tempo
 
 volumes:
+  rabbitmq_data:
   postgres_data:
   target_data:
   prometheus_data:
