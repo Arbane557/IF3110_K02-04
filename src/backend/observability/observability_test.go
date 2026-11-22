@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http/httptest"
 	"sort"
 	"strings"
 	"testing"
@@ -67,6 +68,68 @@ func TestJSONLogsPreserveFieldsAndTraceCorrelation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWaitMetricsAndRetries(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	s := NewService(registry, trace.NewNoopTracerProvider().Tracer("test"))
+	s.RecordQueueWait(2*time.Second)
+	s.RecordQueueWait(-time.Second)
+	s.RecordLockWait(3*time.Second)
+	s.RecordPoolWait(500*time.Millisecond, false)
+	s.RecordPoolWait(time.Second, true)
+	s.RecordRetry()
+	s.RecordRetry()
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, family := range families {
+		for _, metric := range family.Metric {
+			switch family.GetName() {
+			case "migration_queue_wait_seconds":
+				seen[family.GetName()] = true
+				if metric.Histogram.GetSampleCount() != 2 || metric.Histogram.GetSampleSum() != 2 {
+					t.Fatal("queue wait must use seconds and clamp negative clock skew")
+				}
+			case "migration_lock_wait_seconds":
+				seen[family.GetName()] = true
+				if metric.Histogram.GetSampleCount() != 1 || metric.Histogram.GetSampleSum() != 3 {
+					t.Fatal("lock wait was not observed in seconds")
+				}
+			case "database_pool_acquire_seconds":
+				status := metric.Label[0].GetValue()
+				seen[status] = true
+				want := 0.5
+				if status == "failed" { want = 1 }
+				if metric.Histogram.GetSampleCount() != 1 || metric.Histogram.GetSampleSum() != want {
+					t.Fatalf("pool acquisition %s was not measured independently", status)
+				}
+			case "migration_retries_total":
+				seen[family.GetName()] = true
+				if metric.Counter.GetValue() != 2 { t.Fatal("retry count was not accumulated") }
+			}
+		}
+	}
+	for _, key := range []string{"migration_queue_wait_seconds", "migration_lock_wait_seconds", "success", "failed", "migration_retries_total"} {
+		if !seen[key] { t.Errorf("missing metric %s", key) }
+	}
+}
+
+func TestMetricsScrapeRefreshesIdlePoolGauges(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	s := NewService(registry, trace.NewNoopTracerProvider().Tracer("test"))
+	active, idle := int32(2), int32(3)
+	handler := s.MetricsHandler(registry, func() (int32, int32) { return active, idle })
+	for _, expected := range []string{`database_pool_connections{state="idle"} 3`, `database_pool_connections{state="idle"} 0`} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+		if response.Code != 200 || !strings.Contains(response.Body.String(), expected+"\n") {
+			t.Fatalf("scrape did not reflect current pools: status=%d expected=%s", response.Code, expected)
+		}
+		active, idle = 0, 0
 	}
 }
 

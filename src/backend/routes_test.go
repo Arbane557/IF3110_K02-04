@@ -83,3 +83,18 @@ func TestMetricsRouteExposesRecordedMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkerRoutesExposeMetricsWithoutApplicationRoutes(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	observer := observability.NewService(registry, trace.NewNoopTracerProvider().Tracer("test"))
+	observer.RecordRetry()
+	routes := workerMetricsRoutes(observer.MetricsHandler(registry, func() (int32, int32) { return 1, 2 }))
+	response := httptest.NewRecorder()
+	routes.ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+	if response.Code != 200 || !strings.Contains(response.Body.String(), "migration_retries_total 1\n") {
+		t.Fatalf("worker metrics status=%d body=%s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	routes.ServeHTTP(response, httptest.NewRequest("GET", "/api/databases", nil))
+	if response.Code != 404 { t.Fatalf("worker exposed an application route: %d", response.Code) }
+}

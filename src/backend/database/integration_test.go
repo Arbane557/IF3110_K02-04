@@ -12,13 +12,55 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/trace"
 	"wbd/backend/internal/testutil"
+	"wbd/backend/observability"
 )
 
 type integrationPoolProvider struct{ pool *pgxpool.Pool }
 
 func (p integrationPoolProvider) Pool(context.Context, DatabaseID) (*pgxpool.Pool, error) {
 	return p.pool, nil
+}
+
+func TestTargetPoolMetricsIntegration(t *testing.T) {
+	fixture := testutil.NewDatabase(t, false)
+	config := fixture.Pool.Config().Copy()
+	config.MaxConns = 1
+	registry := prometheus.NewRegistry()
+	observer := observability.NewService(registry, trace.NewNoopTracerProvider().Tracer("test"))
+	config.ConnConfig.Tracer = poolAcquireTracer{observer: observer}
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil { t.Fatal(err) }
+	t.Cleanup(pool.Close)
+	manager := NewConnectionManager(nil, nil)
+	manager.pools[1] = pool
+	conn, err := pool.Acquire(context.Background())
+	if err != nil { t.Fatal(err) }
+	defer conn.Release()
+	active, _ := manager.PoolStats()
+	if active != 1 { t.Fatalf("active connections=%d", active) }
+	// Exhaust the only connection, then cancel the competing acquisition.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := pool.Acquire(ctx); !errors.Is(err, context.Canceled) { t.Fatalf("acquire error=%v", err) }
+	families, err := registry.Gather()
+	if err != nil { t.Fatal(err) }
+	foundFailure := false
+	for _, family := range families {
+		if family.GetName() != "database_pool_acquire_seconds" { continue }
+		for _, metric := range family.Metric {
+			if metric.Label[0].GetValue() == "failed" && metric.Histogram.GetSampleCount() == 1 { foundFailure = true }
+		}
+	}
+	if !foundFailure { t.Fatal("cancelled pool acquisition was not observed") }
+	conn.Release()
+	active, idle := manager.PoolStats()
+	if active != 0 || idle != 1 { t.Fatalf("released pool: active=%d idle=%d", active, idle) }
+	manager.Invalidate(1)
+	active, idle = manager.PoolStats()
+	if active != 0 || idle != 0 { t.Fatalf("removed pool remained visible: active=%d idle=%d", active, idle) }
 }
 
 func TestRegistryRepositoryAndConnectionManagerIntegration(t *testing.T) {
