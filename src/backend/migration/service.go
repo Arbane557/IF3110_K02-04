@@ -150,6 +150,9 @@ func (s *Service) Update(ctx context.Context, databaseID database.DatabaseID, ve
 		UPDATE migrations
 		SET sql_text = $3
 		WHERE database_id = $1 AND version = $2 AND status = 'draft'
+        AND NOT EXISTS (SELECT 1 FROM migration_jobs j WHERE j.database_id=$1 AND j.version=$2
+            AND (j.blocks_database OR j.status IN ('pending','running','pending_review')))
+        AND NOT EXISTS (SELECT 1 FROM migration_history h WHERE h.database_id=$1 AND h.version=$2)
 		RETURNING `+migrationColumns, databaseID, version, sqlText))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Migration{}, ErrMigrationLocked
