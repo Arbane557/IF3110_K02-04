@@ -292,6 +292,12 @@ func writeError(w http.ResponseWriter, err error) {
 		status, message = http.StatusNotFound, "migration not found"
 	case errors.Is(err, ErrMigrationLocked):
 		status, message = http.StatusConflict, "migration cannot be changed"
+	case errors.Is(err, ErrJobBusy):
+		status, message = http.StatusConflict, "database has an unfinished migration job"
+	case errors.Is(err, ErrInvalidBatch):
+		status, message = http.StatusBadRequest, "invalid batch configuration"
+	case errors.Is(err, ErrApprovalRequired):
+		status, message = http.StatusForbidden, "group leader approval required"
 	case errors.Is(err, ErrIrreversible):
 		status, message = http.StatusConflict, "migration is irreversible"
 	case errors.Is(err, ErrNotLatestActive):
