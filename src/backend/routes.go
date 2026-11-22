@@ -85,4 +85,9 @@ func (app *App) registerMigrationRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/databases/{databaseID}/migrations/{version}/rollback", change(migration.RollbackMigration))
 	mux.Handle("POST /api/databases/{databaseID}/migrations/{version}/forward", change(migration.ForwardMigration))
 	mux.Handle("GET /api/databases/{databaseID}/migrations/history", get(migration.ListHistory))
+	mux.Handle("GET /api/databases/{databaseID}/jobs/{jobID}", get(migration.GetJob))
+	mux.Handle("GET /api/databases/{databaseID}/jobs", get(migration.ListJobs))
+	mux.Handle("POST /api/databases/{databaseID}/jobs/{jobID}/resume", change(migration.ResumeJob))
+	mux.Handle("POST /api/databases/{databaseID}/jobs/{jobID}/cancel", change(migration.CancelPartialJob))
+	mux.Handle("POST /api/databases/{databaseID}/jobs/{jobID}/approve", change(migration.ApproveJob))
 }

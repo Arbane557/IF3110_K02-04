@@ -102,12 +102,24 @@ func (h *Handler) ExecuteMigration(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := h.service.Execute(r.Context(), id, version, principal.UserID)
+	var request struct {
+		Mode       string `json:"mode"`
+		BatchTable string `json:"batchTable"`
+		BatchSize  int    `json:"batchSize"`
+	}
+	if r.ContentLength > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid job configuration"})
+			return
+		}
+	}
+	item, err := h.service.Enqueue(r.Context(), id, version, principal.UserID, "up", request.Mode, request.BatchTable, request.BatchSize)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, item)
+	writeJSON(w, http.StatusAccepted, item)
 }
 
 func (h *Handler) RollbackMigration(w http.ResponseWriter, r *http.Request) {
@@ -119,12 +131,12 @@ func (h *Handler) RollbackMigration(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := h.service.Rollback(r.Context(), id, version, principal.UserID)
+	item, err := h.service.Enqueue(r.Context(), id, version, principal.UserID, "rollback", "normal", "", 0)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, item)
+	writeJSON(w, http.StatusAccepted, item)
 }
 
 func (h *Handler) ForwardMigration(w http.ResponseWriter, r *http.Request) {
@@ -136,12 +148,97 @@ func (h *Handler) ForwardMigration(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := h.service.Forward(r.Context(), id, version, principal.UserID)
+	item, err := h.service.Enqueue(r.Context(), id, version, principal.UserID, "forward", "normal", "", 0)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, item)
+	writeJSON(w, http.StatusAccepted, item)
+}
+
+func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
+	id, _, ok := h.authorize(w, r, auth.ActionView)
+	if !ok {
+		return
+	}
+	jobID, err := strconv.ParseInt(r.PathValue("jobID"), 10, 64)
+	if err != nil || jobID <= 0 {
+		writeJSON(w, 400, errorResponse{Error: "invalid job ID"})
+		return
+	}
+	job, err := h.service.GetJob(r.Context(), id, jobID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 200, job)
+}
+
+func (h *Handler) ResumeJob(w http.ResponseWriter, r *http.Request) {
+	id, _, ok := h.authorize(w, r, auth.ActionEdit)
+	if !ok {
+		return
+	}
+	jobID, err := strconv.ParseInt(r.PathValue("jobID"), 10, 64)
+	if err != nil || jobID <= 0 {
+		writeJSON(w, 400, errorResponse{Error: "invalid job ID"})
+		return
+	}
+	if err := h.service.ResumeJob(r.Context(), id, jobID); err != nil {
+		writeError(w, err)
+		return
+	}
+	job, _ := h.service.GetJob(r.Context(), id, jobID)
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (h *Handler) CancelPartialJob(w http.ResponseWriter, r *http.Request) {
+	id, principal, ok := h.authorize(w, r, auth.ActionEdit)
+	if !ok {
+		return
+	}
+	jobID, err := strconv.ParseInt(r.PathValue("jobID"), 10, 64)
+	if err != nil || jobID <= 0 {
+		writeJSON(w, 400, errorResponse{Error: "invalid job ID"})
+		return
+	}
+	job, err := h.service.CancelPartialBatch(r.Context(), id, jobID, principal.UserID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
+	id, _, ok := h.authorize(w, r, auth.ActionView)
+	if !ok {
+		return
+	}
+	jobs, err := h.service.ListJobs(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, jobs)
+}
+
+func (h *Handler) ApproveJob(w http.ResponseWriter, r *http.Request) {
+	id, principal, ok := h.authorize(w, r, auth.ActionView)
+	if !ok {
+		return
+	}
+	jobID, err := strconv.ParseInt(r.PathValue("jobID"), 10, 64)
+	if err != nil || jobID <= 0 {
+		writeJSON(w, 400, errorResponse{Error: "invalid job ID"})
+		return
+	}
+	job, err := h.service.ApproveJob(r.Context(), id, jobID, principal.UserID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
 }
 
 func (h *Handler) ListHistory(w http.ResponseWriter, r *http.Request) {
@@ -241,6 +338,12 @@ func writeError(w http.ResponseWriter, err error) {
 		status, message = http.StatusNotFound, "migration not found"
 	case errors.Is(err, ErrMigrationLocked):
 		status, message = http.StatusConflict, "migration cannot be changed"
+	case errors.Is(err, ErrJobBusy):
+		status, message = http.StatusConflict, "database has an unfinished migration job"
+	case errors.Is(err, ErrInvalidBatch):
+		status, message = http.StatusBadRequest, "invalid batch configuration"
+	case errors.Is(err, ErrApprovalRequired):
+		status, message = http.StatusForbidden, "group leader approval required"
 	case errors.Is(err, ErrIrreversible):
 		status, message = http.StatusConflict, "migration is irreversible"
 	case errors.Is(err, ErrNotLatestActive):
