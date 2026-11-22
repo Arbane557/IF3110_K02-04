@@ -24,7 +24,14 @@ func (p integrationPool) Pool(context.Context, database.DatabaseID) (*pgxpool.Po
 }
 
 func TestMigrationLifecycleAndHistoryIntegration(t *testing.T) {
-	fixture := testutil.NewDatabase(t, false)
+	fixture := testutil.NewDatabase(t, true)
+	_, err := fixture.SQL.Exec(`
+        INSERT INTO users(id,username,password_hash) VALUES (7,'creator','test'),(8,'executor','test');
+        INSERT INTO managed_databases(id,name,host,port,database_name,username,password_ciphertext)
+        VALUES(1,'target','localhost',5432,'test','test',decode('00','hex'))`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	service := NewService(fixture.SQL, integrationPool{fixture.Pool})
 	ctx := context.Background()
 	empty, err := service.List(ctx, 1)
@@ -89,7 +96,14 @@ func TestMigrationLifecycleAndHistoryIntegration(t *testing.T) {
 }
 
 func TestMigrationDraftUpdateIntegration(t *testing.T) {
-	fixture := testutil.NewDatabase(t, false)
+	fixture := testutil.NewDatabase(t, true)
+	_, err := fixture.SQL.Exec(`
+        INSERT INTO users(id,username,password_hash) VALUES (7,'creator','test'),(8,'executor','test');
+        INSERT INTO managed_databases(id,name,host,port,database_name,username,password_ciphertext)
+        VALUES(1,'target','localhost',5432,'test','test',decode('00','hex'))`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	service := NewService(fixture.SQL, integrationPool{fixture.Pool})
 	ctx := context.Background()
 	draft, err := service.Create(ctx, 1, 7, "SELECT 1")
@@ -144,7 +158,7 @@ func TestMigrationAccessLevelsIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	group, err := accounts.CreateGroup(ctx, "team")
+	group, err := accounts.CreateGroup(ctx, "team", user.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -126,11 +126,15 @@ func TestDatabasePermissionsAndRevocationIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	view, err := service.CreateGroup(ctx, "viewers")
+	leader, err := service.CreateUser(ctx, "leader", "password123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	edit, err := service.CreateGroup(ctx, "editors")
+	view, err := service.CreateGroup(ctx, "viewers", leader.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit, err := service.CreateGroup(ctx, "editors", leader.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
