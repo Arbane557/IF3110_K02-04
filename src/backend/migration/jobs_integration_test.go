@@ -78,6 +78,7 @@ func TestAsyncMigrationApprovalAndCommitRecovery(t *testing.T) {
 	if err = s.processJob(ctx, j.ID); err != nil {
 		t.Fatal(err)
 	}
+	requireJobStatus(t, s, j.ID, "pending_review")
 	if j, err = s.ApproveJob(ctx, 1, j.ID, 2); err != nil || j.Status != "pending_review" {
 		t.Fatalf("first approval: %+v %v", j, err)
 	}
@@ -112,7 +113,7 @@ func TestAsyncMigrationApprovalAndCommitRecovery(t *testing.T) {
 		t.Fatalf("value=%d err=%v", value, err)
 	}
 	history, err := s.ListHistory(ctx, 1, false)
-	if err != nil || len(history) != 1 || history[0].Status != "success" {
+	if err != nil || len(history) != 1 || history[0].Status != "success" || history[0].SQL != m.SQL || history[0].UserID != 1 || history[0].ExecutionID <= 0 || history[0].StartedAt.IsZero() || history[0].ExecutedAt == nil {
 		t.Fatalf("history=%+v err=%v", history, err)
 	}
 }
@@ -141,6 +142,11 @@ func TestAsyncBatchResumeAndCompensation(t *testing.T) {
 			partial := requireJobStatus(t, s, j.ID, "partial")
 			if partial.BatchesDone != 1 || partial.RowsDone != 2 {
 				t.Fatalf("progress=%+v", partial)
+			}
+			var committed, untouched int
+			if err := target.Pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE id<=2 AND value=1),
+                count(*) FILTER (WHERE id>2 AND value=0) FROM items`).Scan(&committed, &untouched); err != nil || committed != 2 || untouched != 2 {
+				t.Fatalf("partial state: committed=%d untouched=%d error=%v", committed, untouched, err)
 			}
 			if _, err = target.Pool.Exec(ctx, "ALTER TABLE items DROP CONSTRAINT fail_batch"); err != nil {
 				t.Fatal(err)
@@ -178,7 +184,7 @@ func TestAsyncBatchResumeAndCompensation(t *testing.T) {
 func TestAsyncRabbitMQDelivery(t *testing.T) {
 	url := os.Getenv("INTEGRATION_RABBITMQ_URL")
 	if url == "" {
-		t.Skip("set INTEGRATION_RABBITMQ_URL to a dedicated test broker")
+		t.Fatal("integration tests require INTEGRATION_RABBITMQ_URL pointing to a dedicated test broker")
 	}
 	s, target := asyncFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -211,6 +217,96 @@ func TestAsyncRabbitMQDelivery(t *testing.T) {
 		waitWorker(ctx, 100*time.Millisecond)
 	}
 	t.Fatal("worker did not complete the RabbitMQ job")
+}
+
+func TestAsyncRollbackForwardHistoryIntegration(t *testing.T) {
+	ctx := context.Background()
+	s, target := asyncFixture(t)
+	if _, err := target.Pool.Exec(ctx, "CREATE TABLE items(id bigint PRIMARY KEY, value int); INSERT INTO items VALUES(1,0)"); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.CreateWithDown(ctx, 1, 1, "UPDATE items SET value=value+1", "UPDATE items SET value=value-1", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, direction := range []string{"up", "rollback", "forward"} {
+		job, err := s.SubmitJob(ctx, 1, m.Version, 1, direction, BatchOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.processJob(ctx, job.ID); err != nil {
+			t.Fatal(err)
+		}
+		requireJobStatus(t, s, job.ID, "success")
+		if _, err := s.Update(ctx, 1, m.Version, "UPDATE items SET value=99"); !errors.Is(err, ErrMigrationLocked) {
+			t.Fatalf("immutable SQL after %s: %v", direction, err)
+		}
+	}
+	var value int
+	if err := target.Pool.QueryRow(ctx, "SELECT value FROM items WHERE id=1").Scan(&value); err != nil || value != 1 {
+		t.Fatalf("forward state=%d error=%v", value, err)
+	}
+	history, err := s.ListHistory(ctx, 1, false)
+	if err != nil || len(history) != 3 {
+		t.Fatalf("history=%+v error=%v", history, err)
+	}
+	forward, rollback, up := history[0], history[1], history[2]
+	if forward.Direction != "forward" || rollback.Direction != "rollback" || up.Direction != "up" ||
+		forward.SQL != m.SQL || rollback.SQL != m.SQLDown || up.SQL != m.SQL ||
+		rollback.CancelledExecutionID == nil || *rollback.CancelledExecutionID != up.ExecutionID ||
+		forward.ExecutionID == up.ExecutionID {
+		t.Fatalf("execution snapshots=%+v", history)
+	}
+	visible, err := s.ListHistory(ctx, 1, true)
+	if err != nil || len(visible) != 1 || visible[0].ExecutionID != forward.ExecutionID {
+		t.Fatalf("filtered history=%+v error=%v", visible, err)
+	}
+	all, err := s.ListHistory(ctx, 1, false)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("filter changed stored history=%+v error=%v", all, err)
+	}
+}
+
+func TestAsyncFailedRollbackPreservesActiveStateAndHistoryIntegration(t *testing.T) {
+	ctx := context.Background()
+	s, target := asyncFixture(t)
+	if _, err := target.Pool.Exec(ctx, "CREATE TABLE items(id bigint PRIMARY KEY, value int); INSERT INTO items VALUES(1,0)"); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.CreateWithDown(ctx, 1, 1, "UPDATE items SET value=1",
+		"UPDATE items SET value=0; SELECT * FROM missing_relation", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, direction := range []string{"up", "rollback"} {
+		job, err := s.SubmitJob(ctx, 1, m.Version, 1, direction, BatchOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.processJob(ctx, job.ID); err != nil {
+			t.Fatal(err)
+		}
+		status := "success"
+		if direction == "rollback" {
+			status = "failed"
+		}
+		requireJobStatus(t, s, job.ID, status)
+	}
+	var value int
+	if err := target.Pool.QueryRow(ctx, "SELECT value FROM items WHERE id=1").Scan(&value); err != nil || value != 1 {
+		t.Fatalf("failed down committed changes: value=%d error=%v", value, err)
+	}
+	persisted, err := s.Get(ctx, 1, m.Version)
+	if err != nil || !persisted.Active || persisted.Status != "success" {
+		t.Fatalf("failed rollback changed active migration=%+v error=%v", persisted, err)
+	}
+	for _, hide := range []bool{false, true} {
+		history, err := s.ListHistory(ctx, 1, hide)
+		if err != nil || len(history) != 2 || history[0].Direction != "rollback" || history[0].Status != "failed" ||
+			history[0].SQL != m.SQLDown || history[0].ErrorMessage == "" || history[0].ExecutedAt == nil || history[1].Status != "success" {
+			t.Fatalf("hide=%v history=%+v error=%v", hide, history, err)
+		}
+	}
 }
 
 func TestLargeDataBatchPerformance(t *testing.T) {
@@ -258,11 +354,16 @@ func TestLargeDataBatchPerformance(t *testing.T) {
 	if err = s.processJob(ctx, j.ID); err != nil {
 		t.Fatal(err)
 	}
+	batchedElapsed := time.Since(start)
 	job := requireJobStatus(t, s, j.ID, "success")
 	if job.RowsDone != int64(count) {
 		t.Fatalf("committed %d rows, expected %d", job.RowsDone, count)
 	}
-	t.Logf("rows=%d full_update=%s batched_update=%s batches=%d", count, elapsed, time.Since(start), job.BatchesDone)
+	var processed int64
+	if err := target.Pool.QueryRow(ctx, "SELECT count(*) FROM items WHERE processed").Scan(&processed); err != nil || processed != int64(count) {
+		t.Fatalf("persisted processed rows=%d expected=%d error=%v", processed, count, err)
+	}
+	t.Logf("rows=%d full_update=%s batched_update=%s batches=%d", count, elapsed, batchedElapsed, job.BatchesDone)
 }
 
 type jobTestAuthorizer struct{}
@@ -318,5 +419,43 @@ func TestAsyncDatabaseLockAndQueueOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 		requireJobStatus(t, s, id, "success")
+	}
+}
+
+func TestAsyncWorkerRevalidatesActorAccessIntegration(t *testing.T) {
+	ctx := context.Background()
+	s, target := asyncFixture(t)
+	if _, err := s.internalDB.Exec(`
+        INSERT INTO groups(id,name,leader_user_id) VALUES(1,'Editors',2);
+        INSERT INTO group_members(group_id,user_id) VALUES(1,2);
+        INSERT INTO group_database_permissions(group_id,database_id,access_level) VALUES(1,1,'edit')`); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.Create(ctx, 1, 2, "CREATE TABLE forbidden_change(id bigint)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.SubmitJob(ctx, 1, m.Version, 2, "up", BatchOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApproveJob(ctx, 1, j.ID, 2); err != nil {
+		t.Fatal(err)
+	}
+	// Approval cannot preserve execution rights after access is downgraded.
+	if _, err := s.internalDB.Exec("UPDATE group_database_permissions SET access_level='view' WHERE group_id=1 AND database_id=1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.processJob(ctx, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	requireJobStatus(t, s, j.ID, "failed")
+	var exists bool
+	if err := target.Pool.QueryRow(ctx, "SELECT to_regclass('forbidden_change') IS NOT NULL").Scan(&exists); err != nil || exists {
+		t.Fatalf("revoked actor changed target: exists=%v error=%v", exists, err)
+	}
+	history, err := s.ListHistory(ctx, 1, false)
+	if err != nil || len(history) != 1 || history[0].Status != "failed" || history[0].UserID != 2 {
+		t.Fatalf("denied attempt history=%+v error=%v", history, err)
 	}
 }
