@@ -10,6 +10,13 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
       OTEL_RESOURCE_ATTRIBUTES: deployment.environment=development
+    logging:
+      driver: fluentd
+      options:
+        # The Docker daemon sends stdout/stderr to the Collector's published port.
+        fluentd-address: "127.0.0.1:24224"
+        fluentd-async: "true"
+        tag: wbd-backend
     depends_on:
       database:
         condition: service_healthy
@@ -27,6 +34,12 @@ services:
       OTEL_SERVICE_NAME: wbd-migration-worker
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: "127.0.0.1:24224"
+        fluentd-async: "true"
+        tag: wbd-migration-worker
     depends_on:
       database:
         condition: service_healthy
@@ -77,16 +90,44 @@ services:
     volumes:
       - target_data:/var/lib/postgresql/data
 
+  otel-storage-init:
+    image: busybox:1.37
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - mkdir -p /var/lib/otelcol/queue && chown 10001:10001 /var/lib/otelcol /var/lib/otelcol/queue
+    volumes:
+      - otel_queue_data:/var/lib/otelcol
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
+    user: "10001:10001"
+    restart: unless-stopped
     command:
       - --config=/etc/otelcol-contrib/config.yaml
     volumes:
       - ./observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - otel_queue_data:/var/lib/otelcol
     ports:
       - "4318:4318"
+      - "127.0.0.1:24224:24224"
     depends_on:
-      - tempo
+      otel-storage-init:
+        condition: service_completed_successfully
+      tempo:
+        condition: service_started
+      loki:
+        condition: service_started
+
+  loki:
+    image: grafana/loki:3.4.2
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/loki/config.yaml
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/loki
 
   prometheus:
     image: prom/prometheus:latest
@@ -103,6 +144,7 @@ services:
 
   tempo:
     image: grafana/tempo:2.7.2
+    restart: unless-stopped
     command:
       - -config.file=/etc/tempo.yaml
     volumes:
@@ -125,6 +167,23 @@ services:
     depends_on:
       - prometheus
       - tempo
+      - loki
+
+  observability-test:
+    image: golang:1.22
+    profiles: [observability-test]
+    working_dir: /src
+    command: ["go", "test", "-tags=integration,observability", "-count=1", "-timeout=120s", "./observability"]
+    environment:
+      INTEGRATION_OTEL_HTTP_URL: http://otel-collector:4318
+      INTEGRATION_LOKI_URL: http://loki:3100
+    volumes:
+      - ./src/backend:/src:ro
+    depends_on:
+      otel-collector:
+        condition: service_started
+      loki:
+        condition: service_started
 
 volumes:
   rabbitmq_data:
@@ -132,4 +191,6 @@ volumes:
   target_data:
   prometheus_data:
   tempo_data:
+  loki_data:
+  otel_queue_data:
   grafana_data:

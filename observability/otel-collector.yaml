@@ -1,4 +1,11 @@
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/queue
+    fsync: true
+
 receivers:
+  fluentforward:
+    endpoint: 0.0.0.0:24224
   otlp:
     protocols:
       http:
@@ -8,20 +15,48 @@ processors:
   memory_limiter:
     check_interval: 1s
     limit_mib: 256
+  attributes/log_service:
+    actions:
+      - key: service.name
+        from_attribute: fluent.tag
+        action: upsert
+  groupbyattrs/log_service:
+    keys: [service.name]
   batch:
     timeout: 1s
     send_batch_size: 512
 
 exporters:
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: true
+      queue_size: 2048
+      storage: file_storage
   otlp_grpc/tempo:
     endpoint: tempo:4317
     tls:
       insecure: true
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0s
+    sending_queue:
+      enabled: true
+      queue_size: 2048
+      storage: file_storage
   debug:
     verbosity: basic
 
 service:
+  extensions: [file_storage]
   pipelines:
+    logs:
+      receivers: [fluentforward, otlp]
+      processors: [memory_limiter, attributes/log_service, groupbyattrs/log_service, batch]
+      exporters: [otlphttp/loki]
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]

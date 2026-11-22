@@ -61,3 +61,22 @@ jobs:
           INTEGRATION_DATABASE_URL: postgres://app:secret@localhost:5432/app?sslmode=disable
           INTEGRATION_RABBITMQ_URL: amqp://integration:integration@localhost:5672/
         run: go test -race -tags=integration -shuffle=on -count=2 -timeout=180s ./...
+
+  observability-integration-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      COMPOSE_PROJECT_NAME: wbd-observability-ci
+      CREDENTIAL_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start centralized telemetry storage
+        run: docker compose up -d otel-collector
+      - name: Check Collector to Loki log storage
+        run: docker compose --profile observability-test run --rm observability-test
+      - name: Show telemetry service logs
+        if: failure()
+        run: docker compose logs otel-storage-init otel-collector loki tempo
+      - name: Stop telemetry services
+        if: always()
+        run: docker compose --profile observability-test down
