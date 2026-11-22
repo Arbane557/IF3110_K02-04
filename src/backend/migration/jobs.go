@@ -41,18 +41,20 @@ type Job struct {
 	actor                   int64
 	query, down, table      string
 	size                    int
-	source, execution       sql.NullInt64
-	attempts, generation    int
-	traceparent, tracestate string
+	source, execution        sql.NullInt64
+	cancelledExecution       sql.NullInt64
+	attempts, generation     int
+	traceparent, tracestate  string
 }
 
 const jobColumns = `id,database_id,version,direction,mode,status,batches_done,rows_done,error_message,
-    actor,sql_text,sql_down,batch_table,batch_size,source_job,execution_id,attempts,generation,traceparent,tracestate,job_key,blocks_database`
+    actor,sql_text,sql_down,batch_table,batch_size,source_job,execution_id,cancelled_execution_id,attempts,generation,traceparent,tracestate,job_key,blocks_database`
 
 func scanJob(row rowScanner) (Job, error) {
 	var j Job
 	err := row.Scan(&j.ID, &j.DatabaseID, &j.Version, &j.Direction, &j.Mode, &j.Status, &j.BatchesDone, &j.RowsDone, &j.ErrorMessage,
-		&j.actor, &j.query, &j.down, &j.table, &j.size, &j.source, &j.execution, &j.attempts, &j.generation, &j.traceparent, &j.tracestate, &j.key, &j.blocksDatabase)
+		&j.actor, &j.query, &j.down, &j.table, &j.size, &j.source, &j.execution, &j.cancelledExecution,
+		&j.attempts, &j.generation, &j.traceparent, &j.tracestate, &j.key, &j.blocksDatabase)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errJobNotFound
 	}
@@ -235,7 +237,8 @@ func (s *Service) RecoverJob(ctx context.Context, db database.DatabaseID, id, ac
 	return scanJob(s.internalDB.QueryRowContext(ctx, `UPDATE migration_jobs SET
        actor=$3,direction=CASE WHEN $4 THEN 'cancel' ELSE direction END,
        source_job=CASE WHEN $4 THEN id ELSE source_job END,
-       sql_text=CASE WHEN $4 THEN sql_down ELSE sql_text END,execution_id=CASE WHEN status='uncertain' THEN execution_id END,
+       cancelled_execution_id=CASE WHEN $4 THEN COALESCE(cancelled_execution_id,execution_id) ELSE cancelled_execution_id END,
+       sql_text=CASE WHEN $4 THEN sql_down ELSE sql_text END,
        status=CASE WHEN EXISTS(SELECT 1 FROM group_database_permissions WHERE database_id=$1)
            THEN 'pending_review' ELSE 'pending' END,
        generation=generation+1, attempts=0, error_message='', available_at=now(), queued_at=now(),lock_wait_started_at=NULL,published_at=NULL,

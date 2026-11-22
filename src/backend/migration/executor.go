@@ -25,11 +25,15 @@ CREATE TABLE IF NOT EXISTS wbd_migration_commits (
     reversing BOOLEAN NOT NULL,
     batch BIGINT NOT NULL,
     row_count BIGINT NOT NULL DEFAULT 0,
+    execution_id BIGINT,
+    cursor_id BIGINT,
     ids BIGINT[],
     before_rows JSONB,
     after_rows JSONB,
     PRIMARY KEY (job_key,reversing,batch)
-);`
+);
+ALTER TABLE wbd_migration_commits ADD COLUMN IF NOT EXISTS execution_id BIGINT;
+ALTER TABLE wbd_migration_commits ADD COLUMN IF NOT EXISTS cursor_id BIGINT;`
 
 func ensureTargetMetadata(ctx context.Context, conn *pgxpool.Conn) error {
 	_, err := conn.Exec(ctx, targetMetadata)
@@ -42,10 +46,6 @@ func targetProgress(ctx context.Context, conn *pgxpool.Conn, j Job) (done bool, 
 	err = conn.QueryRow(ctx, `SELECT COALESCE(bool_or(batch=0),false),count(*) FILTER(WHERE batch>0),
         COALESCE(sum(row_count) FILTER(WHERE batch>=0),0)
         FROM wbd_migration_commits WHERE job_key=$1 AND reversing=$2`, j.key, j.reversing()).Scan(&done, &batches, &rows)
-	if j.Direction == "cancel" && err == nil {
-		err = conn.QueryRow(ctx, `SELECT count(*)-$2,COALESCE(sum(row_count),0)-$3
-            FROM wbd_migration_commits WHERE job_key=$1 AND NOT reversing AND batch>0`, j.key, batches, rows).Scan(&batches, &rows)
-	}
 	return
 }
 
@@ -61,7 +61,10 @@ func (s *Service) executeJob(ctx context.Context, conn *pgxpool.Conn, j Job) err
 }
 
 func (s *Service) applyBatches(ctx context.Context, conn *pgxpool.Conn, j Job, table string) error {
-	if err := initializeScope(ctx, conn, j.key, table); err != nil {
+	if !j.execution.Valid {
+		return errJobConflict
+	}
+	if err := initializeScope(ctx, conn, j.key, j.execution.Int64, table); err != nil {
 		return err
 	}
 	for {
@@ -96,14 +99,14 @@ func (s *Service) applyBatches(ctx context.Context, conn *pgxpool.Conn, j Job, t
 	}
 }
 
-func initializeScope(ctx context.Context, conn *pgxpool.Conn, key, table string) error {
+func initializeScope(ctx context.Context, conn *pgxpool.Conn, key string, executionID int64, table string) error {
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	tag, err := tx.Exec(ctx, `INSERT INTO wbd_migration_commits(job_key,reversing,batch) VALUES($1,false,-1)
-      ON CONFLICT DO NOTHING`, key)
+	tag, err := tx.Exec(ctx, `INSERT INTO wbd_migration_commits(job_key,reversing,batch,execution_id)
+      VALUES($1,false,-1,$2) ON CONFLICT DO NOTHING`, key, executionID)
 	if err != nil {
 		return err
 	}
@@ -172,6 +175,9 @@ func (s *Service) saveProgress(ctx context.Context, conn *pgxpool.Conn, j Job) e
 
 func (s *Service) commitStep(ctx context.Context, conn *pgxpool.Conn, j Job, batch int64, ids []int64,
 	restore *string, table, expected string, markerOnly bool) (err error) {
+	if !j.execution.Valid {
+		return errJobConflict
+	}
 	started := time.Now()
 	var affected int64
 	defer func() {
@@ -244,8 +250,14 @@ func (s *Service) commitStep(ctx context.Context, conn *pgxpool.Conn, j Job, bat
 			return errCompensation
 		}
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO wbd_migration_commits(job_key,reversing,batch,row_count,ids,before_rows,after_rows)
-        VALUES($1,$2,$3,$4,$5,NULLIF($6,'')::jsonb,NULLIF($7,'')::jsonb)`, j.key, j.reversing(), batch, affected, ids, before, after)
+	var cursor any
+	if len(ids) > 0 {
+		cursor = ids[len(ids)-1]
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO wbd_migration_commits
+      (job_key,reversing,batch,row_count,ids,before_rows,after_rows,execution_id,cursor_id)
+      VALUES($1,$2,$3,$4,$5,NULLIF($6,'')::jsonb,NULLIF($7,'')::jsonb,$8,$9)`,
+		j.key, j.reversing(), batch, affected, ids, before, after, j.execution.Int64, cursor)
 	if err != nil {
 		return err
 	}

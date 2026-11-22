@@ -261,6 +261,19 @@ func (s *Service) startAttempt(ctx context.Context, j Job) (Job, error) {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return j, err
 		}
+	} else if j.Direction == "cancel" {
+		cancelled = j.cancelledExecution
+		if !cancelled.Valid {
+			cancelled = j.execution
+		}
+		if !cancelled.Valid {
+			err = tx.QueryRowContext(ctx, `SELECT execution_id FROM migration_history
+                WHERE database_id=$1 AND version=$2 AND direction IN ('up','forward') AND status='failed'
+                  AND sql_text=$3 ORDER BY execution_id DESC LIMIT 1`, j.DatabaseID, j.Version, j.query).Scan(&cancelled)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return j, err
+			}
+		}
 	}
 	direction := j.Direction
 	if direction == "cancel" {
@@ -427,9 +440,8 @@ func (s *Service) finishJob(ctx context.Context, j Job, status, message string, 
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE migration_jobs SET status=$2,error_message=$3,batches_done=$4,rows_done=$5,
       blocks_database=$6,published_at=NULL,available_at=now()+$7*interval '1 second',
-      queued_at=CASE WHEN $9 THEN clock_timestamp()+$7*interval '1 second' ELSE queued_at END,
-      execution_id=CASE WHEN $8 THEN execution_id ELSE NULL END WHERE id=$1`,
-		j.ID, next, message, j.BatchesDone, j.RowsDone, block, delay, status == "uncertain" || status == "success", next == "pending")
+      queued_at=CASE WHEN $8 THEN clock_timestamp()+$7*interval '1 second' ELSE queued_at END WHERE id=$1`,
+		j.ID, next, message, j.BatchesDone, j.RowsDone, block, delay, next == "pending")
 	if err != nil {
 		return err
 	}

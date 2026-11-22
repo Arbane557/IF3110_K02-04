@@ -4,6 +4,7 @@ package migration
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,30 @@ func requireJobStatus(t *testing.T, s *Service, id int64, status string) Job {
 		t.Fatalf("job=%+v, error=%v; want status %s", j, err, status)
 	}
 	return j
+}
+
+func TestTargetMetadataAddsExecutionAndCursorToExistingCheckpoints(t *testing.T) {
+	ctx := context.Background()
+	target := testutil.NewDatabase(t, false)
+	if _, err := target.Pool.Exec(ctx, `CREATE TABLE wbd_migration_commits (
+        job_key text NOT NULL,reversing boolean NOT NULL,batch bigint NOT NULL,row_count bigint NOT NULL DEFAULT 0,
+        ids bigint[],before_rows jsonb,after_rows jsonb,PRIMARY KEY(job_key,reversing,batch))`); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := target.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	if err = ensureTargetMetadata(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	var columns int
+	if err = target.Pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
+        WHERE table_schema=current_schema() AND table_name='wbd_migration_commits'
+          AND column_name IN ('execution_id','cursor_id')`).Scan(&columns); err != nil || columns != 2 {
+		t.Fatalf("checkpoint columns=%d error=%v", columns, err)
+	}
 }
 
 func TestAsyncMigrationApprovalAndCommitRecovery(t *testing.T) {
@@ -178,6 +203,106 @@ func TestAsyncBatchResumeAndCompensation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAsyncBatchCompensationResumesFromCommittedCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	s, target := asyncFixture(t)
+	if _, err := target.Pool.Exec(ctx, `CREATE TABLE items (id bigint PRIMARY KEY,value int DEFAULT 0,
+        CONSTRAINT fail_batch CHECK(id<5 OR value=0)); INSERT INTO items(id) SELECT generate_series(1,6)`); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.CreateWithDown(ctx, 1, 1, "UPDATE items SET value=value+1 WHERE id = ANY($1::bigint[])",
+		"UPDATE items SET value=value-1 WHERE id = ANY($1::bigint[])", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := s.SubmitJob(ctx, 1, m.Version, 1, "up", BatchOptions{"batch", "items", 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.processJob(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	partial := requireJobStatus(t, s, job.ID, "partial")
+	if partial.BatchesDone != 2 || partial.RowsDone != 4 || !partial.execution.Valid {
+		t.Fatalf("partial checkpoint=%+v", partial)
+	}
+	originalExecution := partial.execution.Int64
+
+	var jobKey string
+	if err = s.internalDB.QueryRowContext(ctx, "SELECT job_key FROM migration_jobs WHERE id=$1", job.ID).Scan(&jobKey); err != nil {
+		t.Fatal(err)
+	}
+	var checkpoints, complete int
+	if err = target.Pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE execution_id>0 AND cursor_id IS NOT NULL)
+        FROM wbd_migration_commits WHERE job_key=$1 AND NOT reversing AND batch>0`, jobKey).Scan(&checkpoints, &complete); err != nil || checkpoints != 2 || complete != 2 {
+		t.Fatalf("batch checkpoints=%d complete=%d error=%v", checkpoints, complete, err)
+	}
+	var originalCursors []int64
+	if err = target.Pool.QueryRow(ctx, `SELECT array_agg(cursor_id ORDER BY batch)
+        FROM wbd_migration_commits WHERE job_key=$1 AND NOT reversing AND batch>0`, jobKey).Scan(&originalCursors); err != nil || len(originalCursors) != 2 || originalCursors[0] != 2 || originalCursors[1] != 4 {
+		t.Fatalf("original batch cursors=%v error=%v", originalCursors, err)
+	}
+
+	if _, err = target.Pool.Exec(ctx, `ALTER TABLE items DROP CONSTRAINT fail_batch;
+        CREATE FUNCTION reject_middle_compensation() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF OLD.id BETWEEN 3 AND 4 AND NEW.value=0 THEN RAISE EXCEPTION 'blocked compensation'; END IF;
+            RETURN NEW;
+        END $$;
+        CREATE TRIGGER reject_middle_compensation BEFORE UPDATE ON items
+        FOR EACH ROW EXECUTE FUNCTION reject_middle_compensation()`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.RecoverJob(ctx, 1, job.ID, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.processJob(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	partiallyReverted := requireJobStatus(t, s, job.ID, "partially_reverted")
+	if partiallyReverted.BatchesDone != 1 || partiallyReverted.RowsDone != 2 || !partiallyReverted.execution.Valid {
+		t.Fatalf("compensation progress=%+v", partiallyReverted)
+	}
+	var firstCompensatedBatch int64
+	if err = target.Pool.QueryRow(ctx, `SELECT batch FROM wbd_migration_commits
+        WHERE job_key=$1 AND reversing AND batch>0`, jobKey).Scan(&firstCompensatedBatch); err != nil || firstCompensatedBatch != 2 {
+		t.Fatalf("first compensated batch=%d error=%v; expected reverse order from batch 2", firstCompensatedBatch, err)
+	}
+	if _, err = target.Pool.Exec(ctx, "DROP TRIGGER reject_middle_compensation ON items; DROP FUNCTION reject_middle_compensation()"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.RecoverJob(ctx, 1, job.ID, 1, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.processJob(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	completed := requireJobStatus(t, s, job.ID, "success")
+	if completed.BatchesDone != 2 || completed.RowsDone != 4 {
+		t.Fatalf("completed compensation=%+v", completed)
+	}
+	var untouched int
+	if err = target.Pool.QueryRow(ctx, "SELECT count(*) FROM items WHERE value<>0").Scan(&untouched); err != nil || untouched != 0 {
+		t.Fatalf("compensation left %d changed rows: %v", untouched, err)
+	}
+	var linkedExecution sql.NullInt64
+	if err = s.internalDB.QueryRowContext(ctx, `SELECT cancelled_execution_id FROM migration_history
+        WHERE database_id=1 AND version=$1 AND direction='rollback' ORDER BY execution_id DESC LIMIT 1`, m.Version).Scan(&linkedExecution); err != nil || !linkedExecution.Valid || linkedExecution.Int64 != originalExecution {
+		t.Fatalf("rollback history linked to %v, want execution %d (error %v)", linkedExecution, originalExecution, err)
+	}
+	if err = target.Pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE execution_id>0 AND cursor_id IS NOT NULL)
+        FROM wbd_migration_commits WHERE job_key=$1 AND batch>0`, jobKey).Scan(&checkpoints, &complete); err != nil || checkpoints != 4 || complete != 4 {
+		t.Fatalf("final checkpoints=%d complete=%d error=%v", checkpoints, complete, err)
+	}
+	var compensationBatches, compensationCursors []int64
+	if err = target.Pool.QueryRow(ctx, `SELECT array_agg(batch ORDER BY execution_id),array_agg(cursor_id ORDER BY execution_id)
+        FROM wbd_migration_commits WHERE job_key=$1 AND reversing AND batch>0`, jobKey).Scan(&compensationBatches, &compensationCursors); err != nil ||
+		len(compensationBatches) != 2 || compensationBatches[0] != 2 || compensationBatches[1] != 1 ||
+		compensationCursors[0] != 6 || compensationCursors[1] != 4 {
+		t.Fatalf("compensation checkpoints=%v cursors=%v error=%v", compensationBatches, compensationCursors, err)
 	}
 }
 
