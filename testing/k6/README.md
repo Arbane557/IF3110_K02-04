@@ -77,7 +77,3 @@ queue wait, durasi job, job throughput, dan observasi recovery.
 | Cooldown | 5 | 2m | - | - | - | - | - | - | - |
 | Recovery | 0 | 1m | - | - | - | - | - | - | - |
 
-Hasil aktual harus mengisi tabel di atas dengan output
-`testing/k6/stress-migration-summary.json`, bukan perkiraan. Jika lingkungan Docker tidak
-berjalan atau migration/worker belum disiapkan, pengujian dinyatakan tidak dijalankan;
-jangan mengisi angka palsu.

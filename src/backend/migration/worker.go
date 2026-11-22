@@ -127,7 +127,7 @@ func (s *Service) runJob(ctx context.Context, job Job) error {
 		case errors.Is(err, errJobConflict), errors.Is(err, ErrIrreversible), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrForwardNotNext):
 			return s.finishJob(ctx, job, incompleteStatus(job), err.Error(), false)
 		default:
-			return s.finishJob(ctx, job, incompleteStatus(job), "Could not revalidate migration", true)
+			return s.finishJob(ctx, job, incompleteStatus(job), "Could not revalidate migration: "+err.Error(), true)
 		}
 	}
 	err = s.executeJob(ctx, conn, job)

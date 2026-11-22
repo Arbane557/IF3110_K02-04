@@ -1,6 +1,7 @@
 import http from "k6/http";
 import { check, sleep } from "k6";
 import { Counter, Rate, Trend } from "k6/metrics";
+import exec from "k6/execution";
 
 const baseUrl = (__ENV.BASE_URL || "http://localhost:6969").replace(/\/$/, "");
 const username = __ENV.K6_USERNAME || "admin";
@@ -59,8 +60,9 @@ function login() {
     redirects: 5,
     tags: { request_type: "auth" },
   });
-  check(response, { "login succeeds": (r) => r.status < 400 });
-  loggedIn = response.status < 400;
+  const whoami = http.get(`${baseUrl}/whoami`, { tags: { request_type: "auth" } });
+  loggedIn = response.status < 400 && whoami.status === 200;
+  check(whoami, { "login succeeds": (r) => r.status === 200 });
 }
 
 function csrfHeaders() {
@@ -71,7 +73,11 @@ function csrfHeaders() {
 }
 
 function apiGet(path, name) {
-  const response = http.get(`${baseUrl}${path}`, { tags: { request_type: "api", endpoint: name } });
+  let response = http.get(`${baseUrl}${path}`, { tags: { request_type: "api", endpoint: name } });
+  if (response.status === 401) {
+    login();
+    response = http.get(`${baseUrl}${path}`, { tags: { request_type: "api", endpoint: name } });
+  }
   apiDuration.add(response.timings.duration);
   const ok = response.status >= 200 && response.status < 300;
   apiErrors.add(!ok);
@@ -80,8 +86,9 @@ function apiGet(path, name) {
 }
 
 function chooseMigration() {
-  const index = (__VU - 1 + __ITER) % databaseIds.length;
+  const index = exec.scenario.iterationInTest % databaseIds.length;
   return {
+    index,
     databaseId: databaseIds[index],
     version: migrationVersions[index] || migrationVersions[0],
   };
@@ -129,8 +136,13 @@ export default function () {
   apiGet(`/api/databases/${migration.databaseId}/migrations`, "list_migrations");
   apiGet(`/api/databases/${migration.databaseId}/jobs`, "list_jobs");
 
+  if (migration.index >= databaseIds.length || exec.scenario.iterationInTest >= databaseIds.length) {
+    sleep(0.5);
+    return;
+  }
+
   const submittedAt = Date.now();
-  const response = http.post(
+  let response = http.post(
     `${baseUrl}/api/databases/${migration.databaseId}/migrations/${migration.version}/execute`,
     JSON.stringify({ mode: "normal", batchTable: "", batchSize: 0 }),
     {
@@ -138,6 +150,17 @@ export default function () {
       tags: { request_type: "job_submit", endpoint: "execute_migration" },
     },
   );
+  if (response.status === 401) {
+    login();
+    response = http.post(
+      `${baseUrl}/api/databases/${migration.databaseId}/migrations/${migration.version}/execute`,
+      JSON.stringify({ mode: "normal", batchTable: "", batchSize: 0 }),
+      {
+        headers: csrfHeaders(),
+        tags: { request_type: "job_submit", endpoint: "execute_migration" },
+      },
+    );
+  }
   apiDuration.add(response.timings.duration);
   const submitted = response.status === 202;
   apiErrors.add(!submitted);
@@ -154,7 +177,7 @@ export function handleSummary(data) {
   return {
     "testing/k6/stress-migration-summary.json": JSON.stringify(data, null, 2),
     stdout: JSON.stringify({
-      api_p50_ms: data.metrics.api_duration_ms?.values?.["p(50)"] ?? null,
+      api_p50_ms: data.metrics.api_duration_ms?.values?.med ?? null,
       api_p95_ms: data.metrics.api_duration_ms?.values?.["p(95)"] ?? null,
       http_request_throughput: data.metrics.http_reqs?.values?.rate ?? null,
       http_error_rate: data.metrics.http_req_failed?.values?.rate ?? null,
