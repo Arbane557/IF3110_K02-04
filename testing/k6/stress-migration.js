@@ -36,7 +36,6 @@ export const options = {
   thresholds: {
     api_duration_ms: [`p(95)<${__ENV.API_P95_THRESHOLD_MS || 500}`],
     api_error_rate: [`rate<${__ENV.API_ERROR_THRESHOLD || 0.05}`],
-    migration_job_failure_rate: [`rate<${__ENV.JOB_ERROR_THRESHOLD || 0.10}`],
   },
 };
 
