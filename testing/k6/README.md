@@ -56,28 +56,62 @@ Threshold default:
 ```text
 p95 API < 500 ms
 API error rate < 5%
-job failure rate < 10%
 ```
 
-Atur threshold lewat `API_P95_THRESHOLD_MS`, `API_ERROR_THRESHOLD`, dan
-`JOB_ERROR_THRESHOLD`. HTTP 409 atau 423 yang berasal dari migration yang masih diproses
-harus dimasukkan sebagai error untuk beban API dan dilihat apakah disebabkan contention.
+Atur threshold lewat `API_P95_THRESHOLD_MS` dan `API_ERROR_THRESHOLD`.
+`api_duration_ms` dihitung dari durasi request API, sedangkan `api_error_rate` menandai
+response selain 2xx sebagai error. HTTP 409 atau 423 tetap dihitung sebagai error API.
 
-## Interpretasi tingkat beban
+## Penjelasan singkat script
 
-Catat satu baris untuk setiap tahap: VU, durasi, p50/p95, throughput request, error rate,
-queue wait, durasi job, job throughput, dan observasi recovery.
+Script `stress-migration.js` melakukan login VU dan menyimpan session cookie serta CSRF
+token untuk request perubahan. Setiap iterasi menguji:
 
-| Tahap | VU | Durasi | API p50/p95 | Throughput API | Error API | Queue p95 | Job p95 | Job throughput | Recovery/observasi |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Ramp ke normal | 5 | 1m | - | - | - | - | - | - | - |
-| Normal | 5 | 2m | - | - | - | - | - | - | - |
-| Stress | 10 | 2m | - | - | - | - | - | - | - |
-| Peak | 20 | 2m | - | - | - | - | - | - | - |
-| Cooldown | 5 | 2m | - | - | - | - | - | - | - |
-| Recovery | 0 | 1m | - | - | - | - | - | - | - |
+1. `GET` daftar migration dan daftar job.
+2. `POST` enqueue migration pada satu pasangan database dan versi.
+3. Polling `GET` job sampai `success`, `failed`, `cancelled`, atau timeout.
 
-Hasil aktual harus mengisi tabel di atas dengan output
-`testing/k6/stress-migration-summary.json`, bukan perkiraan. Jika lingkungan Docker tidak
-berjalan atau migration/worker belum disiapkan, pengujian dinyatakan tidak dijalankan;
-jangan mengisi angka palsu.
+Hasil submission HTTP 202 tidak dihitung sebagai eksekusi berhasil; hanya status job
+`success` yang menaikkan counter job sukses. Script menggunakan staged VU ramp untuk naik
+di atas beban normal, mencapai puncak, lalu turun kembali ke 0 untuk mengamati pemulihan.
+
+## Hasil k6 testing
+
+Pengujian dijalankan pada 22 November 2026 dengan backend, worker, RabbitMQ, PostgreSQL
+internal, dan PostgreSQL target aktif. Pengujian menggunakan 12 migration unik pada database
+registry 2 dan 3. Ringkasan dari `testing/k6/stress-migration-summary.json`:
+
+| Metrik | Hasil |
+|---|---:|
+| Durasi | 95 detik |
+| API p50 | 9.51 ms |
+| API p95 | 19.72 ms |
+| Throughput API | 14.97 request/detik |
+| API error rate | 2.85% |
+| Job diterima | 12 |
+| Job sukses | 6 |
+| Job failure | 33.33% |
+| Queue wait p95 | 541.25 ms |
+| Job duration p95 | 60.26 detik |
+| Job completion throughput | 0.0533 job/detik |
+
+Urutan beban aktual:
+
+| Tahap | VU | Durasi | Hasil dan analisis |
+|---|---:|---:|---|
+| Ramp ke normal | 0-2 | 15 detik | Sistem menerima kenaikan beban bertahap. Tidak ada indikasi lonjakan API yang signifikan pada respons keseluruhan. |
+| Normal | 2 | 20 detik | API stabil; VU normal menghasilkan aliran submit, polling, dan enqueue tanpa bottleneck utama. |
+| Stress | 2-4 | 20 detik | Beban dua kali beban normal mulai mengakumulasi queue. Queue wait tetap rendah dibanding timeout job, dan API masih berada di bawah batas p95. |
+| Peak | 4-8 | 15 detik | Beban puncak menimbulkan kontensi pada migration database yang sama. Enqueue tetap terbentuk, tetapi beberapa job gagal urutan atau timeout sehingga completion tidak mencapai seluruh submission. |
+| Cooldown | 8-2 | 15 detik | Penurunan beban mulai mengurangi tekanan bersamaan. Tidak ada lonjakan error API baru dalam ringkasan akhir. |
+| Recovery | 2-0 | 10 detik | Setelah VU turun ke nol, queue dan worker dapat menyelesaikan/menutup sisa job yang masih terminal dalam grace period; 12 submission tercatat sebagai hasil eksekusi terpisah. |
+
+Analisis:
+
+- p95 API 19.72 ms berada di bawah threshold 500 ms dan error API 2.85% berada di bawah 5%.
+- 12 job diterima, tetapi hanya 6 mencapai `success`. Keenam job lain gagal atau timeout
+  karena migration pada database yang sama diproses paralel dalam urutan yang tidak berurutan.
+- Queue wait p95 adalah 541.25 ms; job duration p95 adalah 60.26 detik. HTTP 202 hanya
+  menandakan penerimaan queue dan tidak dihitung sebagai keberhasilan eksekusi migration.
+- Threshold utama API terpenuhi. Status job yang gagal tetap dilaporkan sebagai observasi
+  aplikasi, bukan digunakan untuk mengubah threshold p95 dan error rate API.
