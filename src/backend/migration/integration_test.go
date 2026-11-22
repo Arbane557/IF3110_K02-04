@@ -24,70 +24,76 @@ func (p integrationPool) Pool(context.Context, database.DatabaseID) (*pgxpool.Po
 }
 
 func TestMigrationLifecycleAndHistoryIntegration(t *testing.T) {
-	fixture := testutil.NewDatabase(t, true)
-	_, err := fixture.SQL.Exec(`
-        INSERT INTO users(id,username,password_hash) VALUES (7,'creator','test'),(8,'executor','test');
-        INSERT INTO managed_databases(id,name,host,port,database_name,username,password_ciphertext)
-        VALUES(1,'target','localhost',5432,'test','test',decode('00','hex'))`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := NewService(fixture.SQL, integrationPool{fixture.Pool})
+	service, target := asyncFixture(t)
 	ctx := context.Background()
 	empty, err := service.List(ctx, 1)
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("fresh history=%+v error=%v", empty, err)
 	}
-	first, err := service.Create(ctx, 1, 7, `CREATE TABLE committed (id INTEGER PRIMARY KEY)`)
+	first, err := service.Create(ctx, 1, 1, `CREATE TABLE committed (id INTEGER PRIMARY KEY)`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Version != 1 || first.Status != "draft" || first.CreatedBy != 7 || first.CreatedAt.IsZero() {
+	if first.Version != 1 || first.Status != "draft" || first.CreatedBy != 1 || first.CreatedAt.IsZero() {
 		t.Fatalf("draft=%+v", first)
 	}
-	executed, err := service.Execute(ctx, 1, first.Version, 8)
+	job, err := service.SubmitJob(ctx, 1, first.Version, 1, "up", BatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if executed.Status != "success" || executed.ExecutedBy == nil || *executed.ExecutedBy != 8 || executed.ExecutedAt == nil {
+	if _, err := service.Update(ctx, 1, first.Version, "SELECT 1"); !errors.Is(err, ErrMigrationLocked) {
+		t.Fatalf("update queued migration error=%v", err)
+	}
+	if err := service.processJob(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	requireJobStatus(t, service, job.ID, "success")
+	executed, err := service.Get(ctx, 1, first.Version)
+	if err != nil || executed.Status != "success" || !executed.Active || executed.ExecutedBy == nil || *executed.ExecutedBy != 1 || executed.ExecutedAt == nil {
 		t.Fatalf("execution=%+v", executed)
 	}
 	// A successful return alone does not establish that DDL was committed.
 	var count int
-	if err := fixture.Pool.QueryRow(ctx, `SELECT count(*) FROM committed`).Scan(&count); err != nil {
+	if err := target.Pool.QueryRow(ctx, `SELECT count(*) FROM committed`).Scan(&count); err != nil {
 		t.Fatal("successful DDL was not committed")
 	}
 	if _, err := service.Update(ctx, 1, first.Version, "SELECT 1"); !errors.Is(err, ErrMigrationLocked) {
 		t.Fatalf("update executed migration error=%v", err)
 	}
-	if _, err := service.Execute(ctx, 1, first.Version, 8); !errors.Is(err, ErrMigrationLocked) {
-		t.Fatalf("re-execute error=%v", err)
+	// Duplicate delivery must not execute already committed SQL again.
+	if err := service.processJob(ctx, job.ID); err != nil {
+		t.Fatal(err)
 	}
-	failed, err := service.Create(ctx, 1, 7, `CREATE TABLE rolled_back (id INTEGER); INSERT INTO committed VALUES (1); SELECT * FROM missing_relation`)
+	failed, err := service.Create(ctx, 1, 1, `CREATE TABLE rolled_back (id INTEGER); INSERT INTO committed VALUES (1); SELECT * FROM missing_relation`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Execute(ctx, 1, failed.Version, 8); !errors.Is(err, ErrMigrationFailed) {
-		t.Fatalf("execution error=%v", err)
+	failedJob, err := service.SubmitJob(ctx, 1, failed.Version, 1, "up", BatchOptions{})
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := service.processJob(ctx, failedJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	requireJobStatus(t, service, failedJob.ID, "failed")
 	var exists bool
-	if err := fixture.Pool.QueryRow(ctx, `SELECT to_regclass('rolled_back') IS NOT NULL`).Scan(&exists); err != nil {
+	if err := target.Pool.QueryRow(ctx, `SELECT to_regclass('rolled_back') IS NOT NULL`).Scan(&exists); err != nil {
 		t.Fatal(err)
 	}
 	if exists {
 		t.Fatal("failed migration left its DDL behind")
 	}
-	if err := fixture.Pool.QueryRow(ctx, `SELECT count(*) FROM committed`).Scan(&count); err != nil {
+	if err := target.Pool.QueryRow(ctx, `SELECT count(*) FROM committed`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
 		t.Fatal("failed migration left inserted data behind")
 	}
-	history, err := service.List(ctx, 1)
+	history, err := service.ListHistory(ctx, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 2 || history[0].Version != 1 || history[0].Status != "success" || history[1].Version != 2 || history[1].Status != "failed" || history[1].ErrorMessage == "" || history[1].ExecutedAt == nil || history[1].ExecutedBy == nil || *history[1].ExecutedBy != 8 {
+	if len(history) != 2 || history[0].Version != 2 || history[0].Status != "failed" || history[0].ErrorMessage == "" || history[0].ExecutedAt == nil || history[0].UserID != 1 || history[0].SQL != failed.SQL || history[1].Version != 1 || history[1].Status != "success" || history[1].SQL != first.SQL {
 		t.Fatalf("persisted history=%+v", history)
 	}
 	if _, err := service.Get(ctx, 1, 999); !errors.Is(err, ErrMigrationNotFound) {
@@ -178,6 +184,17 @@ func TestMigrationAccessLevelsIntegration(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/databases/{databaseID}/migrations", authHandler.RequireAuthAPI(authHandler.RequireCSRF(http.HandlerFunc(handler.CreateMigration))))
 	mux.Handle("GET /api/databases/{databaseID}/migrations", authHandler.RequireAuthAPI(http.HandlerFunc(handler.ListMigrations)))
+	mux.Handle("GET /api/databases/{databaseID}/migrations/history", authHandler.RequireAuthAPI(http.HandlerFunc(handler.ListHistory)))
+	mux.Handle("GET /api/databases/{databaseID}/jobs", authHandler.RequireAuthAPI(http.HandlerFunc(handler.Jobs)))
+	for path, action := range map[string]http.HandlerFunc{
+		"/api/databases/{databaseID}/migrations/{version}/execute":  handler.ExecuteMigration,
+		"/api/databases/{databaseID}/migrations/{version}/rollback": handler.RollbackMigration,
+		"/api/databases/{databaseID}/migrations/{version}/forward":  handler.ForwardMigration,
+		"/api/databases/{databaseID}/jobs/{jobID}/resume":           handler.ResumeJob,
+		"/api/databases/{databaseID}/jobs/{jobID}/cancel":           handler.CancelJob,
+	} {
+		mux.Handle("POST "+path, authHandler.RequireAuthAPI(authHandler.RequireCSRF(action)))
+	}
 	request := func(method, url string, authenticated, csrf bool) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(method, url, strings.NewReader(`{"sql":"SELECT 1"}`))
@@ -214,6 +231,23 @@ func TestMigrationAccessLevelsIntegration(t *testing.T) {
 	}
 	if got := request("POST", "/api/databases/1/migrations", true, true); got.Code != 403 {
 		t.Fatalf("view create status=%d", got.Code)
+	}
+	for _, path := range []string{"/api/databases/1/migrations/history", "/api/databases/1/jobs"} {
+		if got := request("GET", path, true, false); got.Code != 200 {
+			t.Fatalf("viewer read %s: status=%d", path, got.Code)
+		}
+	}
+	for _, path := range []string{
+		"/api/databases/1/migrations/1/execute", "/api/databases/1/migrations/1/rollback",
+		"/api/databases/1/migrations/1/forward", "/api/databases/1/jobs/1/resume", "/api/databases/1/jobs/1/cancel",
+	} {
+		if got := request("POST", path, true, true); got.Code != 403 {
+			t.Fatalf("viewer mutation %s: status=%d", path, got.Code)
+		}
+	}
+	jobs, err := service.ListJobs(ctx, 1)
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("denied requests changed jobs=%+v error=%v", jobs, err)
 	}
 	before, err := service.List(ctx, 1)
 	if err != nil || len(before) != 0 {

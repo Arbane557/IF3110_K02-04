@@ -23,6 +23,18 @@ jobs:
   integration-test:
     runs-on: ubuntu-latest
     services:
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: integration
+          RABBITMQ_DEFAULT_PASS: integration
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
       postgres:
         image: postgres:17
         env:
@@ -47,4 +59,5 @@ jobs:
       - name: Run integration tests
         env:
           INTEGRATION_DATABASE_URL: postgres://app:secret@localhost:5432/app?sslmode=disable
+          INTEGRATION_RABBITMQ_URL: amqp://integration:integration@localhost:5672/
         run: go test -race -tags=integration -shuffle=on -count=2 -timeout=180s ./...

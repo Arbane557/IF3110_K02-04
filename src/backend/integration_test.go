@@ -124,6 +124,21 @@ func TestLoginAdminAndCSRFRoutesIntegration(t *testing.T) {
 	if count != 1 {
 		t.Fatal("CSRF-denied request created a user")
 	}
+	for _, path := range []string{
+		"/api/databases/1/migrations/1/execute",
+		"/api/databases/1/migrations/1/rollback",
+		"/api/databases/1/migrations/1/forward",
+		"/api/databases/1/jobs/1/approve",
+		"/api/databases/1/jobs/1/resume",
+		"/api/databases/1/jobs/1/cancel",
+	} {
+		if response := request("POST", path, "{}", false); response.Code != 403 {
+			t.Fatalf("missing CSRF on %s: status=%d", path, response.Code)
+		}
+	}
+	if err := fixture.SQL.QueryRow("SELECT count(*) FROM migration_jobs").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("CSRF-denied requests changed jobs: count=%d error=%v", count, err)
+	}
 	created := request("POST", "/api/auth/register", body, true)
 	if created.Code != 201 || strings.Contains(created.Body.String(), "password456") {
 		t.Fatalf("register status=%d", created.Code)
