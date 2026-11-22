@@ -217,6 +217,9 @@ Test mencakup validasi registry, enkripsi credential, handler authorization, con
 
 Panduan fixture dan update test: [test.md](test.md). Syarat unit/integration untuk setiap fitur yang di-push: [testing_req.md](testing_req.md). Integration memakai schema terisolasi dan wajib menggunakan database test disposable; jangan gunakan database aplikasi/production.
 
+Untuk pengujian beban bertahap API dan migration menggunakan k6, lihat
+[panduan dan template hasil stress testing](testing/k6/README.md).
+
 ## Continuous Integration
 
 Workflow [CI](.github/workflows/ci.yml) berjalan pada setiap `push` dan `pull_request`:
