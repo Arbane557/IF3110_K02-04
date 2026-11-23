@@ -179,6 +179,7 @@
         }
 
         let watchGeneration = 0;
+        window.addEventListener("spa:navigated", () => { watchGeneration += 1; }, { once: true });
 
         async function watchJob(job) {
             const generation = ++watchGeneration;

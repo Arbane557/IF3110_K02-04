@@ -13,10 +13,10 @@ import (
 )
 
 type Handler struct {
-	registry    *RegistryService
-	catalog     *CatalogService
-	authorizer  Authorizer
-	templates   *template.Template
+	registry   *RegistryService
+	catalog    *CatalogService
+	authorizer Authorizer
+	templates  *template.Template
 }
 
 type Authorizer interface {
@@ -29,7 +29,7 @@ func NewHandler(registry *RegistryService, catalog *CatalogService, authorizer A
 }
 
 func (h *Handler) DatabasePage(w http.ResponseWriter, r *http.Request) {
-	if err := h.templates.ExecuteTemplate(w, "databases.html", map[string]string{"CSRFToken": auth.CSRFTokenFromRequest(r)}); err != nil {
+	if err := h.templates.ExecuteTemplate(w, "spa.html", nil); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }
@@ -300,9 +300,9 @@ type databaseConfigRequest struct {
 	Host         string `json:"host"`
 	Port         uint16 `json:"port"`
 	DatabaseName string `json:"databaseName"`
-	Username     string   `json:"username"`
-	SSLMode      string   `json:"sslMode"`
-	Password     string   `json:"password"`
+	Username     string `json:"username"`
+	SSLMode      string `json:"sslMode"`
+	Password     string `json:"password"`
 }
 
 func writeServiceError(w http.ResponseWriter, err error) {

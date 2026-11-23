@@ -18,6 +18,7 @@ func (app *App) routes() http.Handler {
 		mux.Handle("GET /metrics", app.Metrics)
 	}
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+	mux.Handle("GET /views/", http.StripPrefix("/views/", http.FileServer(http.Dir("templates"))))
 	return mux
 }
 
