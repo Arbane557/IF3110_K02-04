@@ -138,7 +138,7 @@ func (h *Handler) submitJob(w http.ResponseWriter, r *http.Request, direction st
 }
 
 func (h *Handler) Jobs(w http.ResponseWriter, r *http.Request) {
-	db, _, ok := h.authorize(w, r, auth.ActionView)
+	db, principal, ok := h.authorize(w, r, auth.ActionView)
 	if !ok {
 		return
 	}
@@ -146,6 +146,13 @@ func (h *Handler) Jobs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	for i := range jobs {
+		jobs[i].CanApprove, err = h.service.CanApproveJob(r.Context(), jobs[i], principal.UserID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, jobs)
 }
@@ -179,6 +186,9 @@ func (h *Handler) handleJob(w http.ResponseWriter, r *http.Request, op string) {
 	case "resume", "cancel":
 		job, err = h.service.RecoverJob(r.Context(), db, id, principal.UserID, op == "cancel")
 		status = http.StatusAccepted
+	}
+	if err == nil {
+		job.CanApprove, err = h.service.CanApproveJob(r.Context(), job, principal.UserID)
 	}
 	if err != nil {
 		writeError(w, err)

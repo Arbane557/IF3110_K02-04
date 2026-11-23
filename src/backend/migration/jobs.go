@@ -36,15 +36,34 @@ type Job struct {
 	BatchesDone             int64               `json:"batchesDone"`
 	RowsDone                int64               `json:"rowsDone"`
 	ErrorMessage            string              `json:"errorMessage,omitempty"`
+	CanApprove              bool                `json:"canApprove"`
 	blocksDatabase          bool
 	key                     string
 	actor                   int64
 	query, down, table      string
 	size                    int
-	source, execution        sql.NullInt64
-	cancelledExecution       sql.NullInt64
-	attempts, generation     int
-	traceparent, tracestate  string
+	source, execution       sql.NullInt64
+	cancelledExecution      sql.NullInt64
+	attempts, generation    int
+	traceparent, tracestate string
+}
+
+func (s *Service) CanApproveJob(ctx context.Context, job Job, actor int64) (bool, error) {
+	var canApprove bool
+	err := s.internalDB.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1
+		FROM groups g
+		JOIN group_database_permissions p ON p.group_id = g.id
+		WHERE p.database_id = $1
+		  AND g.leader_user_id = $2
+		  AND $3 = 'pending_review'
+		  AND NOT EXISTS (
+			SELECT 1 FROM migration_job_approvals a
+			WHERE a.job_id = $4 AND a.generation = $5
+			  AND a.group_id = g.id AND a.leader_id = $2
+		  )
+	)`, job.DatabaseID, actor, job.Status, job.ID, job.generation).Scan(&canApprove)
+	return canApprove, err
 }
 
 const jobColumns = `id,database_id,version,direction,mode,status,batches_done,rows_done,error_message,

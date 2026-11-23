@@ -91,6 +91,7 @@ services:
       - "5433:5432"
     volumes:
       - target_data:/var/lib/postgresql/data
+      - ./src/backend/db/target-init:/docker-entrypoint-initdb.d:ro
 
   otel-storage-init:
     image: busybox:1.37
