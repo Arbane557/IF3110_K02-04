@@ -1,6 +1,7 @@
 services:
   backend:
     build: ./src/backend
+    restart: unless-stopped
     ports:
       - "6969:6969"
     environment:

@@ -83,7 +83,7 @@
                         });
                         action.append(button);
                     } else {
-                        action.textContent = "â€”";
+                        action.textContent = "NONE";
                     }
                     row.append(username, role, action);
                     usersList.append(row);
@@ -95,7 +95,7 @@
 
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
-            status.textContent = "Creating userâ€¦";
+            status.textContent = "Creating user...";
             const values = Object.fromEntries(new FormData(form));
             try {
                 const result = await requestJSON("/api/auth/register", {

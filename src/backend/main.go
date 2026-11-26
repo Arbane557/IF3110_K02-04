@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"log"
 	"net"
@@ -48,9 +49,9 @@ func main() {
 	internalDB.SetMaxIdleConns(5)
 	internalDB.SetConnMaxLifetime(30 * time.Minute)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := internalDB.PingContext(ctx); err != nil {
+	if err := waitForDatabase(ctx, internalDB.PingContext, time.Second); err != nil {
 		log.Fatal("connect database:", err)
 	}
 
@@ -156,4 +157,23 @@ func (app *App) healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func waitForDatabase(ctx context.Context, ping func(context.Context) error, retryInterval time.Duration) error {
+	var lastErr error
+	for {
+		if err := ping(ctx); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("database did not become available (last error: %v): %w", lastErr, ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
