@@ -212,7 +212,7 @@ func (h *Handler) ListHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ExplainMigration(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := h.authorize(w, r, auth.ActionEdit)
+	id, principal, ok := h.authorize(w, r, auth.ActionEdit)
 	if !ok {
 		return
 	}
@@ -220,7 +220,8 @@ func (h *Handler) ExplainMigration(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	plan, err := h.service.Explain(r.Context(), id, request.SQL)
+	ctx := database.WithReadOnlyQuery(r.Context(), id, principal.UserID, "EXPLAIN [redacted SQL]")
+	plan, err := h.service.Explain(ctx, id, request.SQL)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return

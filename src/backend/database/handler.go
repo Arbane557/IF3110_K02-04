@@ -156,11 +156,11 @@ func (h *Handler) TestConnection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListSchemas(w http.ResponseWriter, r *http.Request) {
-	id, ok := h.requireView(w, r)
+	id, ctx, ok := h.requireView(w, r)
 	if !ok {
 		return
 	}
-	result, err := h.catalog.ListSchemas(r.Context(), id)
+	result, err := h.catalog.ListSchemas(ctx, id)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -169,11 +169,11 @@ func (h *Handler) ListSchemas(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListTables(w http.ResponseWriter, r *http.Request) {
-	id, ok := h.requireView(w, r)
+	id, ctx, ok := h.requireView(w, r)
 	if !ok {
 		return
 	}
-	result, err := h.catalog.ListTables(r.Context(), id, r.PathValue("schema"))
+	result, err := h.catalog.ListTables(ctx, id, r.PathValue("schema"))
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -182,11 +182,11 @@ func (h *Handler) ListTables(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetTableDetails(w http.ResponseWriter, r *http.Request) {
-	id, ok := h.requireView(w, r)
+	id, ctx, ok := h.requireView(w, r)
 	if !ok {
 		return
 	}
-	result, err := h.catalog.GetTableDetails(r.Context(), id, r.PathValue("schema"), r.PathValue("table"))
+	result, err := h.catalog.GetTableDetails(ctx, id, r.PathValue("schema"), r.PathValue("table"))
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -195,7 +195,7 @@ func (h *Handler) GetTableDetails(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetRows(w http.ResponseWriter, r *http.Request) {
-	id, ok := h.requireView(w, r)
+	id, ctx, ok := h.requireView(w, r)
 	if !ok {
 		return
 	}
@@ -204,7 +204,7 @@ func (h *Handler) GetRows(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid pagination"})
 		return
 	}
-	result, err := h.catalog.GetRows(r.Context(), id, r.PathValue("schema"), r.PathValue("table"), page)
+	result, err := h.catalog.GetRows(ctx, id, r.PathValue("schema"), r.PathValue("table"), page)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -225,21 +225,21 @@ func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-func (h *Handler) requireView(w http.ResponseWriter, r *http.Request) (DatabaseID, bool) {
+func (h *Handler) requireView(w http.ResponseWriter, r *http.Request) (DatabaseID, context.Context, bool) {
 	id, ok := pathDatabaseID(w, r)
 	if !ok {
-		return 0, false
+		return 0, nil, false
 	}
 	principal, err := h.authorizer.PrincipalFromRequest(r)
 	if err != nil {
 		writeServiceError(w, ErrUnauthorized)
-		return 0, false
+		return 0, nil, false
 	}
 	if err := h.authorizer.AuthorizeDatabase(r.Context(), principal, int64(id), auth.ActionView); err != nil {
 		writeServiceError(w, err)
-		return 0, false
+		return 0, nil, false
 	}
-	return id, true
+	return id, WithReadOnlyQuery(r.Context(), id, principal.UserID, ""), true
 }
 
 func decodeConfig(w http.ResponseWriter, r *http.Request) (DatabaseConfig, bool) {

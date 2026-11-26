@@ -18,6 +18,7 @@ func NewCatalogService(pools TargetPoolProvider) *CatalogService {
 }
 
 func (s *CatalogService) ListSchemas(ctx context.Context, id DatabaseID) ([]Schema, error) {
+	ctx = catalogQueryContext(ctx, id, "")
 	pool, err := s.pools.Pool(ctx, id)
 	if err != nil {
 		return nil, err
@@ -43,6 +44,7 @@ func (s *CatalogService) ListSchemas(ctx context.Context, id DatabaseID) ([]Sche
 }
 
 func (s *CatalogService) ListTables(ctx context.Context, id DatabaseID, schema string) ([]Table, error) {
+	ctx = catalogQueryContext(ctx, id, "")
 	pool, err := s.pools.Pool(ctx, id)
 	if err != nil {
 		return nil, err
@@ -71,6 +73,7 @@ func (s *CatalogService) ListTables(ctx context.Context, id DatabaseID, schema s
 }
 
 func (s *CatalogService) GetTableDetails(ctx context.Context, id DatabaseID, schema, table string) (TableDetails, error) {
+	ctx = catalogQueryContext(ctx, id, "")
 	pool, err := s.pools.Pool(ctx, id)
 	if err != nil {
 		return TableDetails{}, err
@@ -94,6 +97,7 @@ func (s *CatalogService) GetTableDetails(ctx context.Context, id DatabaseID, sch
 }
 
 func (s *CatalogService) GetRows(ctx context.Context, id DatabaseID, schema, table string, page Page) (RowsResult, error) {
+	ctx = catalogQueryContext(ctx, id, "")
 	pool, err := s.pools.Pool(ctx, id)
 	if err != nil {
 		return RowsResult{}, err
@@ -103,7 +107,8 @@ func (s *CatalogService) GetRows(ctx context.Context, id DatabaseID, schema, tab
 	}
 	page = normalizePage(page)
 	query := fmt.Sprintf("SELECT * FROM %s LIMIT $1 OFFSET $2", pgx.Identifier{schema, table}.Sanitize())
-	rows, err := pool.Query(ctx, query, page.Size, (page.Number-1)*page.Size)
+	dataCtx := catalogQueryContext(ctx, id, "SELECT * FROM <redacted table> LIMIT $1 OFFSET $2")
+	rows, err := pool.Query(dataCtx, query, page.Size, (page.Number-1)*page.Size)
 	if err != nil {
 		return RowsResult{}, ErrDatabaseUnavailable
 	}
