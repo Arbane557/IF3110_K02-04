@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -75,7 +75,7 @@
                             try {
                                 await requestJSON(`/api/auth/users/${user.id}/admin`, { method: "PUT" });
                                 await loadUsers();
-                                usersStatus.textContent = `${user.username} is now an admin. Their active sessions will rotate on their next request.`;
+                                usersStatus.textContent = `${user.username} is now an admin. `;
                             } catch (error) {
                                 usersStatus.textContent = error.message;
                                 button.disabled = false;
@@ -83,7 +83,7 @@
                         });
                         action.append(button);
                     } else {
-                        action.textContent = "—";
+                        action.textContent = "â€”";
                     }
                     row.append(username, role, action);
                     usersList.append(row);
@@ -95,7 +95,7 @@
 
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
-            status.textContent = "Creating user…";
+            status.textContent = "Creating userâ€¦";
             const values = Object.fromEntries(new FormData(form));
             try {
                 const result = await requestJSON("/api/auth/register", {
@@ -118,3 +118,4 @@
     </script>
 </body>
 </html>
+

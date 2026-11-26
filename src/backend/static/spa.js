@@ -1,4 +1,4 @@
-(() => {
+﻿(() => {
     const routes = [
         { match: /^\/login$/, view: "login.html" },
         { match: /^\/databases$/, view: "databases.html" },
@@ -70,6 +70,10 @@
             document.title = viewDocument.title || "Database Management Platform";
             document.querySelector("main").replaceWith(document.importNode(nextMain, true));
             document.body.dataset.route = pathname;
+            document.querySelectorAll(".topbar a[href]").forEach(link => {
+                const active = link.getAttribute("href") === pathname || (pathname.startsWith("/groups/") && link.getAttribute("href") === "/groups");
+                if (active) link.setAttribute("aria-current", "page");
+            });
             window.dispatchEvent(new CustomEvent("spa:navigated", { detail: { pathname } }));
             executeControllers(viewDocument);
             window.scrollTo({ top: 0, behavior: "instant" });
@@ -116,3 +120,4 @@
     window.__spaNavigate = pathname => render(pathname, { push: true });
     render(location.pathname, { replace: true });
 })();
+
