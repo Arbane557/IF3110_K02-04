@@ -249,7 +249,8 @@ func TestAsyncBatchCompensationResumesFromCommittedCheckpoint(t *testing.T) {
 	if _, err = target.Pool.Exec(ctx, `ALTER TABLE items DROP CONSTRAINT fail_batch;
         CREATE FUNCTION reject_middle_compensation() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
-            IF OLD.id BETWEEN 3 AND 4 AND NEW.value=0 THEN RAISE EXCEPTION 'blocked compensation'; END IF;
+            -- Batch 2 (IDs 3–4) must commit before batch 1 is blocked.
+            IF OLD.id BETWEEN 1 AND 2 AND NEW.value=0 THEN RAISE EXCEPTION 'blocked compensation'; END IF;
             RETURN NEW;
         END $$;
         CREATE TRIGGER reject_middle_compensation BEFORE UPDATE ON items
@@ -301,7 +302,7 @@ func TestAsyncBatchCompensationResumesFromCommittedCheckpoint(t *testing.T) {
 	if err = target.Pool.QueryRow(ctx, `SELECT array_agg(batch ORDER BY execution_id),array_agg(cursor_id ORDER BY execution_id)
         FROM wbd_migration_commits WHERE job_key=$1 AND reversing AND batch>0`, jobKey).Scan(&compensationBatches, &compensationCursors); err != nil ||
 		len(compensationBatches) != 2 || compensationBatches[0] != 2 || compensationBatches[1] != 1 ||
-		compensationCursors[0] != 6 || compensationCursors[1] != 4 {
+		len(compensationCursors) != 2 || compensationCursors[0] != 4 || compensationCursors[1] != 2 {
 		t.Fatalf("compensation checkpoints=%v cursors=%v error=%v", compensationBatches, compensationCursors, err)
 	}
 }
@@ -440,6 +441,10 @@ func TestLargeDataBatchPerformance(t *testing.T) {
 	}
 	s, target := asyncFixture(t)
 	ctx := context.Background()
+	var postgresVersion string
+	if err := target.Pool.QueryRow(ctx, "SHOW server_version_num").Scan(&postgresVersion); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := target.Pool.Exec(ctx, "CREATE TABLE items (id bigint PRIMARY KEY, processed bool DEFAULT false)"); err != nil {
 		t.Fatal(err)
 	}
@@ -453,10 +458,14 @@ func TestLargeDataBatchPerformance(t *testing.T) {
 			t.Fatal(err)
 		}
 		start := time.Now()
-		if _, err := target.Pool.Exec(ctx, "UPDATE items SET processed=true"); err != nil {
+		tag, err := target.Pool.Exec(ctx, "UPDATE items SET processed=true")
+		elapsed = time.Since(start)
+		if err != nil {
 			t.Fatal(err)
 		}
-		elapsed = time.Since(start)
+		if tag.RowsAffected() != int64(count) {
+			t.Fatalf("full UPDATE affected %d rows, expected %d", tag.RowsAffected(), count)
+		}
 		if elapsed > time.Second {
 			break
 		}
@@ -464,14 +473,19 @@ func TestLargeDataBatchPerformance(t *testing.T) {
 	if elapsed <= time.Second {
 		t.Fatalf("large UPDATE took %v; expected more than 1s", elapsed)
 	}
-	if _, err := target.Pool.Exec(ctx, "UPDATE items SET processed=false"); err != nil {
+	tag, err := target.Pool.Exec(ctx, "UPDATE items SET processed=false WHERE processed")
+	if err != nil {
 		t.Fatal(err)
 	}
+	if tag.RowsAffected() != int64(count) {
+		t.Fatalf("reset affected %d rows, expected %d", tag.RowsAffected(), count)
+	}
+	const batchSize = 10000
 	m, err := s.Create(ctx, 1, 1, "UPDATE items SET processed=true WHERE id = ANY($1::bigint[])")
 	if err != nil {
 		t.Fatal(err)
 	}
-	j, err := s.SubmitJob(ctx, 1, m.Version, 1, "up", BatchOptions{"batch", "items", 10000})
+	j, err := s.SubmitJob(ctx, 1, m.Version, 1, "up", BatchOptions{"batch", "items", batchSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,11 +498,15 @@ func TestLargeDataBatchPerformance(t *testing.T) {
 	if job.RowsDone != int64(count) {
 		t.Fatalf("committed %d rows, expected %d", job.RowsDone, count)
 	}
+	if want := int64((count + batchSize - 1) / batchSize); job.BatchesDone != want {
+		t.Fatalf("committed %d batches, expected %d", job.BatchesDone, want)
+	}
 	var processed int64
 	if err := target.Pool.QueryRow(ctx, "SELECT count(*) FROM items WHERE processed").Scan(&processed); err != nil || processed != int64(count) {
 		t.Fatalf("persisted processed rows=%d expected=%d error=%v", processed, count, err)
 	}
-	t.Logf("rows=%d full_update=%s batched_update=%s batches=%d", count, elapsed, batchedElapsed, job.BatchesDone)
+	t.Logf("postgres_version_num=%s rows=%d full_update=%s batched_update=%s batch_size=%d batches=%d",
+		postgresVersion, count, elapsed, batchedElapsed, batchSize, job.BatchesDone)
 }
 
 type jobTestAuthorizer struct{}

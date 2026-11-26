@@ -27,7 +27,7 @@ type Database struct {
 
 // NewDatabase creates a private schema. All connections use that schema only,
 // preventing unqualified queries from falling back to application/public tables.
-// With platform=true, fixtures load the actual production init SQL.
+// With platform=true, fixtures load the platform schema without development data.
 func NewDatabase(t *testing.T, platform bool) *Database {
 	t.Helper()
 	dsn := os.Getenv("INTEGRATION_DATABASE_URL")
@@ -92,6 +92,11 @@ func NewDatabase(t *testing.T, platform bool) *Database {
 			t.Fatal("production init SQL not found")
 		}
 		for _, path := range paths {
+			// Each test supplies its own users and IDs. The development seed
+			// inserts an admin and installs an extension outside fixture isolation.
+			if filepath.Base(path) == "008_development_seed.sql" {
+				continue
+			}
 			contents, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatalf("read init SQL: %v", err)
