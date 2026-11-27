@@ -115,15 +115,24 @@
             if (!pendingApprovalJob) return;
             try {
                 const job = await requestJSON(`/api/databases/${pendingApprovalJob.databaseId}/jobs/${pendingApprovalJob.jobId}/approve`, {method:"POST"});
-                editorStatus.textContent = `Approval recorded; job ${job.jobId} is ${job.status}.`;
                 approveJobButton.hidden = true;
+                await watchJob(job);
             } catch (error) {editorStatus.textContent = error.message;}
         });
         let resumableJob = null;
         resumeJobButton.addEventListener("click", async () => {
             if (!resumableJob) return;
             try {
-                const job = await requestJSON(`/api/databases/${resumableJob.databaseId}/jobs/${resumableJob.jobId}/resume`, { method: "POST" });
+                const latest = await requestJSON(`/api/databases/${resumableJob.databaseId}/jobs/${resumableJob.jobId}`);
+                if (!["partial", "uncertain", "partially_reverted"].includes(latest.status)) {
+                    editorStatus.textContent = `Job status changed to ${latest.status}; reload the job list.`;
+                    await loadJobs();
+                    return;
+                }
+                if (latest.status === "uncertain" && !confirm(
+                    "The database could not confirm whether this migration committed. Reconcile it now? The worker checks recorded commits and checkpoints first, then resumes only work that is not recorded as committed."
+                )) return;
+                const job = await requestJSON(`/api/databases/${latest.databaseId}/jobs/${latest.jobId}/resume`, { method: "POST" });
                 resumeJobButton.hidden = true;
                 await watchJob(job);
             } catch (error) { editorStatus.textContent = error.message; }
@@ -159,7 +168,12 @@
                         button.type = "button";
                         button.textContent = "Approve (leader)";
                         button.addEventListener("click", async () => {
-                            try { await requestJSON(`/api/databases/${job.databaseId}/jobs/${job.jobId}/approve`, {method:"POST"}); await loadJobs(); }
+                            try {
+                                const approvedJob = await requestJSON(`/api/databases/${job.databaseId}/jobs/${job.jobId}/approve`, {method:"POST"});
+                                await loadExecutionHistory();
+                                await loadJobs();
+                                await watchJob(approvedJob);
+                            }
                             catch (error) { migrationStatus.textContent = error.message; }
                         });
                         item.append(button);
@@ -193,11 +207,13 @@
                 if (generation !== watchGeneration || currentDatabase?.id !== job.databaseId) return;
                 const current = await requestJSON(`/api/databases/${job.databaseId}/jobs/${job.jobId}`);
                 if (generation !== watchGeneration || currentDatabase?.id !== job.databaseId) return;
+                await loadExecutionHistory();
                 pendingApprovalJob = current.status === "pending_review" ? current : null;
                 approveJobButton.hidden = !pendingApprovalJob;
                 editorStatus.textContent = `Job ${current.jobId}: ${current.status}; ${current.batchesDone} batches, ${current.rowsDone} rows committed${current.errorMessage ? ` — ${current.errorMessage}` : ""}`;
                 if (!["pending_review", "pending", "running"].includes(current.status)) {
                     resumableJob = ["partial", "uncertain", "partially_reverted"].includes(current.status) ? current : null;
+                    resumeJobButton.textContent = current.status === "uncertain" ? "Reconcile uncertain job" : "Resume partial job";
                     resumeJobButton.hidden = !resumableJob || currentDatabase?.accessLevel !== "edit";
                     cancelPartialButton.hidden = current.status !== "partial" || current.mode !== "batch" || currentDatabase?.accessLevel !== "edit";
                     await loadHistory();
@@ -327,7 +343,7 @@
                     executionHistoryList.innerHTML = '<tr><td colspan="7">No migration attempts yet.</td></tr>';
                     return;
                 }
-                for (const entry of entries) {
+                for (const entry of entries.reverse()) {
                     const row = document.createElement("tr");
                     const values = [
                         entry.executionId,

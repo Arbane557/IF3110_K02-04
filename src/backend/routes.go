@@ -2,6 +2,13 @@ package main
 
 import "net/http"
 
+func noStore(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		handler.ServeHTTP(w, r)
+	})
+}
+
 func workerMetricsRoutes(metrics http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", metrics)
@@ -17,8 +24,8 @@ func (app *App) routes() http.Handler {
 	if app.Metrics != nil {
 		mux.Handle("GET /metrics", app.Metrics)
 	}
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
-	mux.Handle("GET /views/", http.StripPrefix("/views/", http.FileServer(http.Dir("templates"))))
+	mux.Handle("GET /static/", noStore(http.StripPrefix("/static/", http.FileServer(http.Dir("static")))))
+	mux.Handle("GET /views/", noStore(http.StripPrefix("/views/", http.FileServer(http.Dir("templates")))))
 	return mux
 }
 
@@ -27,8 +34,8 @@ func (app *App) registerPageRoutes(mux *http.ServeMux) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 	})
 	mux.HandleFunc("GET /health", app.healthHandler)
-	mux.Handle("GET /databases", app.Auth.RequireAuth(http.HandlerFunc(app.Database.DatabasePage)))
-	mux.Handle("GET /migrations", app.Auth.RequireAuth(http.HandlerFunc(app.Migration.MigrationPage)))
+	mux.Handle("GET /databases", app.Auth.RequireAuth(noStore(http.HandlerFunc(app.Database.DatabasePage))))
+	mux.Handle("GET /migrations", app.Auth.RequireAuth(noStore(http.HandlerFunc(app.Migration.MigrationPage))))
 }
 
 func (app *App) registerAuthRoutes(mux *http.ServeMux) {
@@ -70,6 +77,7 @@ func (app *App) registerDatabaseRoutes(mux *http.ServeMux) {
 	mux.Handle("PUT /api/databases/{databaseID}", admin(db.UpdateDatabase))
 	mux.Handle("DELETE /api/databases/{databaseID}", admin(db.DeleteDatabase))
 	mux.Handle("POST /api/databases/{databaseID}/test-connection", admin(db.TestConnection))
+	mux.Handle("GET /api/databases/{databaseID}/status", authenticated(db.ConnectionStatus))
 	mux.Handle("GET /api/databases/{databaseID}/schemas", authenticated(db.ListSchemas))
 	mux.Handle("GET /api/databases/{databaseID}/schemas/{schema}/tables", authenticated(db.ListTables))
 	mux.Handle("GET /api/databases/{databaseID}/schemas/{schema}/tables/{table}", authenticated(db.GetTableDetails))

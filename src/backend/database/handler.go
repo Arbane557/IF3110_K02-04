@@ -155,6 +155,22 @@ func (h *Handler) TestConnection(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (h *Handler) ConnectionStatus(w http.ResponseWriter, r *http.Request) {
+	id, ctx, ok := h.requireView(w, r)
+	if !ok {
+		return
+	}
+	if err := h.registry.TestConnection(ctx, id); err != nil {
+		if errors.Is(err, ErrDatabaseUnavailable) {
+			writeJSON(w, http.StatusOK, map[string]bool{"connected": false})
+			return
+		}
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"connected": true})
+}
+
 func (h *Handler) ListSchemas(w http.ResponseWriter, r *http.Request) {
 	id, ctx, ok := h.requireView(w, r)
 	if !ok {

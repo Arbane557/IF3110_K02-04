@@ -48,7 +48,7 @@
             <p id="list-status" class="status" role="status" aria-live="polite">Loading databases…</p>
             <div class="table-wrap">
                 <table>
-                    <thead><tr><th>Name</th><th>ID</th><th>Access</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Name</th><th>ID</th><th>Access</th><th>Status</th><th>Actions</th></tr></thead>
                     <tbody id="database-list"></tbody>
                 </table>
             </div>
@@ -119,6 +119,14 @@
         let selectedTable = null;
         let currentPage = 1;
         const pageSize = 50;
+        const databaseViewEvents = new AbortController();
+
+        // A browser tab can be backgrounded without the SPA mounting this view again.
+        // Refresh its live connection checks when the user returns to the tab.
+        window.addEventListener("spa:navigated", () => databaseViewEvents.abort(), { once: true });
+        document.addEventListener("visibilitychange", () => {
+            if (!document.hidden) loadDatabases();
+        }, { signal: databaseViewEvents.signal });
 
         async function requestJSON(url, options = {}) {
             const method = (options.method || "GET").toUpperCase();
@@ -146,24 +154,30 @@
                     const name = document.createElement("td");
                     const id = document.createElement("td");
                     const access = document.createElement("td");
+                    const status = document.createElement("td");
                     const action = document.createElement("td");
                     name.textContent = database.name;
                     id.textContent = database.id;
                     access.textContent = currentRole === "ADMIN" ? "Platform admin" : "Group access";
+                    status.textContent = "Checking…";
                     if (currentRole === "ADMIN") {
                         const button = document.createElement("button");
                         button.type = "button";
                         button.textContent = "Connect";
+                        button.hidden = true;
                         button.addEventListener("click", async () => {
                             button.disabled = true;
                             button.textContent = "Connecting…";
                             try {
                                 await requestJSON(`/api/databases/${database.id}/test-connection`, { method: "POST" });
-                                button.textContent = "Connected";
+                                status.textContent = "Connected";
+                                button.hidden = true;
                             } catch (error) {
+                                status.textContent = "Disconnected";
                                 button.textContent = "Retry";
                                 listStatus.textContent = error.message;
                                 button.disabled = false;
+                                button.hidden = false;
                             }
                         });
                         action.append(button);
@@ -173,8 +187,24 @@
                     browse.textContent = "Browse schema";
                     browse.addEventListener("click", () => openViewer(database));
                     action.append(browse);
-                    row.append(name, id, access, action);
+                    row.append(name, id, access, status, action);
                     databaseList.append(row);
+                    requestJSON(`/api/databases/${database.id}/status`).then(connection => {
+                        status.textContent = connection.connected ? "Connected" : "Disconnected";
+                        const connectButton = action.querySelector("button");
+                        if (connectButton && connectButton.textContent !== "Connecting…") {
+                            connectButton.hidden = connection.connected;
+                            connectButton.disabled = false;
+                        }
+                    }).catch(() => {
+                        status.textContent = "Unavailable";
+                        const connectButton = action.querySelector("button");
+                        if (connectButton) {
+                            connectButton.textContent = "Retry";
+                            connectButton.hidden = false;
+                            connectButton.disabled = false;
+                        }
+                    });
                 }
             } catch (error) {
                 listStatus.textContent = error.message;
@@ -195,7 +225,7 @@
                 form.reset();
                 form.elements.port.value = 5432;
                 form.elements.sslMode.value = "require";
-                formStatus.textContent = "Saved. Select Connect to test it.";
+                formStatus.textContent = "Saved. Checking the database connection…";
                 await loadDatabases();
             } catch (error) {
                 formStatus.textContent = error.message;

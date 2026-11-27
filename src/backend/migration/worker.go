@@ -398,8 +398,10 @@ func (s *Service) finishJob(ctx context.Context, j Job, status, message string, 
 	historyStatus := "failed"
 	if status == "success" {
 		historyStatus = "success"
+	} else if status == "uncertain" {
+		historyStatus = "uncertain"
 	}
-	if j.execution.Valid && status != "uncertain" {
+	if j.execution.Valid {
 		if _, err = tx.ExecContext(ctx, `UPDATE migration_history SET status=$2,executed_at=now(),error_message=NULLIF($3,'')
           WHERE execution_id=$1 AND status='running'`, j.execution, historyStatus, message); err != nil {
 			return err

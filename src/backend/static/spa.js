@@ -7,7 +7,6 @@
         { match: /^\/groups$/, view: "groups.html" },
         { match: /^\/groups\/\d+$/, view: "group.html" },
     ];
-    const viewCache = new Map();
     let navigation = 0;
 
     function routeFor(pathname) {
@@ -20,13 +19,9 @@
     }
 
     async function loadView(name) {
-        if (!viewCache.has(name)) {
-            viewCache.set(name, fetch(`/views/${name}`, { credentials: "same-origin" }).then(async response => {
-                if (!response.ok) throw new Error(`Could not load view (${response.status})`);
-                return response.text();
-            }));
-        }
-        return viewCache.get(name);
+        const response = await fetch(`/views/${name}`, { credentials: "same-origin", cache: "no-store" });
+        if (!response.ok) throw new Error(`Could not load view (${response.status})`);
+        return response.text();
     }
 
     function executeControllers(viewDocument) {

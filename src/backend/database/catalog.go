@@ -56,6 +56,7 @@ func (s *CatalogService) ListTables(ctx context.Context, id DatabaseID, schema s
 		SELECT table_schema, table_name, table_type
 		FROM information_schema.tables
 		WHERE table_schema = $1
+		  AND table_name NOT IN ('wbd_migration_commits', 'wbd_migration_scope')
 		ORDER BY table_name`, schema)
 	if err != nil {
 		return nil, ErrDatabaseUnavailable
