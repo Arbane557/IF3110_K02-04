@@ -167,11 +167,26 @@ func (s *Service) Explain(ctx context.Context, databaseID database.DatabaseID, s
 	if err := validateSQL(sqlText); err != nil {
 		return "", err
 	}
+	statements, err := splitMigrationSQL(sqlText)
+	if err != nil || len(statements) != 1 {
+		return "", errors.New("preview requires exactly one SQL statement")
+	}
+	keyword := statementStart.FindString(statements[0].log)
+	switch strings.ToUpper(keyword) {
+	case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "WITH", "VALUES", "TABLE":
+	default:
+		return "", errors.New("statement is not supported by preview")
+	}
 	pool, err := s.pools.Pool(ctx, databaseID)
 	if err != nil {
 		return "", err
 	}
-	rows, err := pool.Query(ctx, "EXPLAIN "+sqlText)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, "EXPLAIN "+statements[0].sql, pgx.QueryExecModeDescribeExec)
 	if err != nil {
 		return "", err
 	}

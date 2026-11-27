@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/propagation"
+	"wbd/backend/auth"
 	"wbd/backend/observability"
 )
 
@@ -138,7 +139,7 @@ func (s *Service) runJob(ctx context.Context, job Job) error {
 		case errors.Is(err, errJobConflict), errors.Is(err, ErrIrreversible), errors.Is(err, ErrNotLatestActive), errors.Is(err, ErrForwardNotNext):
 			return s.finishJob(ctx, job, incompleteStatus(job), err.Error(), false)
 		default:
-			return s.finishJob(ctx, job, incompleteStatus(job), "Could not revalidate migration: "+err.Error(), true)
+			return s.finishJob(ctx, job, incompleteStatus(job), "Could not revalidate migration", true)
 		}
 	}
 	err = s.executeJob(ctx, conn, job)
@@ -310,15 +311,12 @@ func (s *Service) startAttempt(ctx context.Context, j Job) (Job, error) {
 }
 
 func (s *Service) revalidateJob(ctx context.Context, j Job) error {
-	var allowed bool
-	err := s.internalDB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=$1 AND (u.is_admin OR EXISTS(
-        SELECT 1 FROM group_members m JOIN group_database_permissions p ON p.group_id=m.group_id
-        WHERE m.user_id=u.id AND p.database_id=$2 AND p.access_level='edit')))`, j.actor, j.DatabaseID).Scan(&allowed)
-	if err != nil {
+	access := auth.NewAccessService(s.internalDB)
+	if err := access.AuthorizeDatabase(ctx, auth.Principal{UserID: j.actor}, int64(j.DatabaseID), auth.ActionEdit); err != nil {
+		if errors.Is(err, auth.ErrForbidden) || errors.Is(err, auth.ErrUnauthorized) {
+			return errJobConflict
+		}
 		return err
-	}
-	if !allowed {
-		return errJobConflict
 	}
 	approved, err := approvalsComplete(ctx, s.internalDB, j)
 	if err != nil {

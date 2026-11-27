@@ -37,7 +37,7 @@ func TestMigrationLifecycleAndHistoryIntegration(t *testing.T) {
 	if first.Version != 1 || first.Status != "draft" || first.CreatedBy != 1 || first.CreatedAt.IsZero() {
 		t.Fatalf("draft=%+v", first)
 	}
-	job, err := service.SubmitJob(ctx, 1, first.Version, 1, "up", BatchOptions{})
+	job, err := submitApprovedFixtureJob(service, ctx, first.Version, "up", BatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestMigrationLifecycleAndHistoryIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	failedJob, err := service.SubmitJob(ctx, 1, failed.Version, 1, "up", BatchOptions{})
+	failedJob, err := submitApprovedFixtureJob(service, ctx, failed.Version, "up", BatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,6 +149,11 @@ func TestMigrationExplainDoesNotExecuteIntegration(t *testing.T) {
 	}
 	if _, err := service.Explain(ctx, 1, "not valid SQL"); err == nil {
 		t.Fatal("invalid SQL accepted")
+	}
+	for _, query := range []string{"SELECT 1; SELECT 2", "ANALYZE SELECT 1"} {
+		if _, err := service.Explain(ctx, 1, query); err == nil {
+			t.Fatal("preview accepted a script or EXPLAIN execution option")
+		}
 	}
 }
 

@@ -140,7 +140,7 @@ edit > view > tidak ada akses
 
 Contoh: bila Group A memberi `view` dan Group B memberi `edit` pada database yang sama, user memperoleh akses `edit`.
 
-> Catatan implementasi saat ini: `AccessService` masih memberi Platform Admin izin otomatis ke semua database target. Ini perlu diselaraskan lebih lanjut dengan ketentuan bahwa Platform Admin bukan tingkat akses database.
+Platform Admin dapat mengelola registry. Akses ke schema, data, dan migration tetap mengikuti izin grup, termasuk untuk akun Platform Admin.
 
 ## Session dan keamanan
 
@@ -191,10 +191,12 @@ POST /api/databases/{databaseID}/migrations/explain
 Request body:
 
 ```json
-{"sql":"CREATE INDEX users_email_idx ON users(email)"}
+{"sql":"UPDATE public.products SET stock = stock + 1 WHERE id = 1"}
 ```
 
-Implementasi saat ini memakai `EXPLAIN`, sehingga menampilkan rencana dan estimasi PostgreSQL. `EXPLAIN ANALYZE` belum digunakan karena menjalankan query sungguhan dan dapat mengubah data bila SQL draft bersifat mutatif.
+Preview menerima satu statement yang dapat dijelaskan PostgreSQL, seperti
+`SELECT`, `INSERT`, `UPDATE`, atau `DELETE`. Aplikasi meminta estimasi dengan
+`EXPLAIN` dalam transaksi read-only.
 
 ## Log dan trace query read-only
 
@@ -277,6 +279,17 @@ Output run di atas:
 postgres_version_num=170012 rows=500000 full_update=1.2192905s batched_update=8.1206757s batch_size=10000 batches=50
 --- PASS: TestLargeDataBatchPerformance (12.84s)
 ```
+
+### Pemulihan lock migration
+
+Worker memegang advisory lock PostgreSQL pada satu koneksi target sepanjang job,
+termasuk di antara commit batch. Saat koneksi worker terputus, PostgreSQL
+melepaskan lock tersebut. Job yang belum selesai tetap memblokir job lain
+untuk database yang sama melalui status yang disimpan di database platform.
+Pesan RabbitMQ yang belum di-ack dapat dikirim ulang. Worker mengambil lock
+kembali dan memeriksa bukti commit serta checkpoint di database target sebelum
+menjalankan SQL lagi. Batch yang sudah commit tidak diulang. Jika hasil commit
+belum dapat dipastikan, worker mempertahankan blokir sampai bukti dapat diperiksa.
 
 ## Continuous Integration
 

@@ -352,11 +352,12 @@
 
         async function loadDatabases() {
             try {
-                const databases = await requestJSON("/api/databases");
+                const databases = (await requestJSON("/api/databases"))
+                    .filter(database => ["view", "edit"].includes(database.accessLevel));
                 databaseSelect.replaceChildren(new Option("Select a database", ""));
                 for (const database of databases) {
                     const option = new Option(database.name, database.id);
-                    option.dataset.accessLevel = database.accessLevel || "edit";
+                    option.dataset.accessLevel = database.accessLevel;
                     databaseSelect.add(option);
                 }
                 databaseSelect.disabled = false;

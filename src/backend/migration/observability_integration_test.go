@@ -43,7 +43,7 @@ func TestAsyncWorkerObservabilityIntegration(t *testing.T) {
 			}
 			requestCtx, requestSpan := provider.Tracer("api-test").Start(ctx, "api.request")
 			requestContext := requestSpan.SpanContext()
-			job, err := s.SubmitJob(requestCtx, 1, m.Version, 1, "up", BatchOptions{})
+			job, err := submitApprovedFixtureJob(s, requestCtx, m.Version, "up", BatchOptions{})
 			requestSpan.End()
 			if err != nil {
 				t.Fatal(err)
@@ -156,7 +156,7 @@ func TestQueueAndLockWaitSurviveDeferredDeliveryIntegration(t *testing.T) {
 	s.observer = observability.NewService(registry, trace.NewNoopTracerProvider().Tracer("test"))
 	m, err := s.Create(ctx, 1, 1, "SELECT 1")
 	if err != nil { t.Fatal(err) }
-	job, err := s.SubmitJob(ctx, 1, m.Version, 1, "up", BatchOptions{})
+	job, err := submitApprovedFixtureJob(s, ctx, m.Version, "up", BatchOptions{})
 	if err != nil { t.Fatal(err) }
 	conn, err := target.Pool.Acquire(ctx)
 	if err != nil { t.Fatal(err) }
@@ -191,7 +191,7 @@ func TestAsyncRetryMetricsIntegration(t *testing.T) {
         END IF;
         END $$`)
 	if err != nil { t.Fatal(err) }
-	job, err := s.SubmitJob(ctx, 1, m.Version, 1, "up", BatchOptions{})
+	job, err := submitApprovedFixtureJob(s, ctx, m.Version, "up", BatchOptions{})
 	if err != nil { t.Fatal(err) }
 	if err := s.processJob(ctx, job.ID); err != nil { t.Fatal(err) }
 	requireJobStatus(t, s, job.ID, "pending")
@@ -225,7 +225,7 @@ func TestBatchMetricsCountOnlyCommittedRowsAndExcludeCompletionMarkersIntegratio
         CONSTRAINT fail_batch CHECK(id<3 OR value=0)); INSERT INTO items(id) VALUES(1),(2),(3),(4)`); err != nil { t.Fatal(err) }
 	m, err := s.Create(ctx, 1, 1, "UPDATE items SET value=value+1 WHERE id = ANY($1::bigint[])")
 	if err != nil { t.Fatal(err) }
-	job, err := s.SubmitJob(ctx, 1, m.Version, 1, "up", BatchOptions{"batch","items",2})
+	job, err := submitApprovedFixtureJob(s, ctx, m.Version, "up", BatchOptions{"batch","items",2})
 	if err != nil { t.Fatal(err) }
 	if err := s.processJob(ctx, job.ID); err != nil { t.Fatal(err) }
 	requireJobStatus(t, s, job.ID, "partial")
@@ -236,7 +236,7 @@ func TestBatchMetricsCountOnlyCommittedRowsAndExcludeCompletionMarkersIntegratio
 		t.Fatalf("failed batches=%v", got)
 	}
 	if _, err := target.Pool.Exec(ctx, "ALTER TABLE items DROP CONSTRAINT fail_batch"); err != nil { t.Fatal(err) }
-	if _, err := s.RecoverJob(ctx, 1, job.ID, 1, false); err != nil { t.Fatal(err) }
+	if _, err := recoverApprovedFixtureJob(s, ctx, job.ID, false); err != nil { t.Fatal(err) }
 	if err := s.processJob(ctx, job.ID); err != nil { t.Fatal(err) }
 	requireJobStatus(t, s, job.ID, "success")
 	if got := observedMetric(t, registry, "migration_rows_processed_total", map[string]string{"status":"success"}).GetCounter().GetValue(); got != 4 {

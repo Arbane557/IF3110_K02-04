@@ -168,11 +168,13 @@
                         });
                         action.append(button);
                     }
-                    const browse = document.createElement("button");
-                    browse.type = "button";
-                    browse.textContent = "Browse schema";
-                    browse.addEventListener("click", () => openViewer(database));
-                    action.append(browse);
+                    if (["view", "edit"].includes(database.accessLevel)) {
+                        const browse = document.createElement("button");
+                        browse.type = "button";
+                        browse.textContent = "Browse schema";
+                        browse.addEventListener("click", () => openViewer(database));
+                        action.append(browse);
+                    }
                     row.append(name, id, access, action);
                     databaseList.append(row);
                 }

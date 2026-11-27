@@ -11,7 +11,7 @@ import (
 
 var (
 	ErrUnauthorized = errors.New("unauthorized")
-	ErrForbidden   = errors.New("forbidden")
+	ErrForbidden    = errors.New("forbidden")
 )
 
 type Principal struct {
@@ -56,12 +56,14 @@ func (s *AccessService) AuthorizeDatabase(ctx context.Context, principal Princip
 	if principal.UserID <= 0 {
 		return ErrUnauthorized
 	}
-	if principal.IsPlatformAdmin {
-		return nil
-	}
-	requiredLevel := "view"
-	if action == ActionEdit {
+	var requiredLevel string
+	switch action {
+	case ActionView:
+		requiredLevel = "view"
+	case ActionEdit:
 		requiredLevel = "edit"
+	default:
+		return ErrForbidden
 	}
 	var allowed bool
 	err := s.db.QueryRowContext(ctx, `

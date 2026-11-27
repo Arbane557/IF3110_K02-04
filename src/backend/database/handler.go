@@ -45,13 +45,6 @@ func (h *Handler) ListDatabases(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	if principal.IsPlatformAdmin {
-		for i := range items {
-			items[i].AccessLevel = "edit"
-		}
-		writeJSON(w, http.StatusOK, items)
-		return
-	}
 	visible := make([]DatabaseSummary, 0, len(items))
 	for _, item := range items {
 		err := h.authorizer.AuthorizeDatabase(r.Context(), principal, int64(item.ID), auth.ActionEdit)
@@ -67,6 +60,9 @@ func (h *Handler) ListDatabases(w http.ResponseWriter, r *http.Request) {
 		} else if !errors.Is(err, auth.ErrForbidden) {
 			writeServiceError(w, err)
 			return
+		} else if principal.IsPlatformAdmin {
+			item.AccessLevel = "none"
+			visible = append(visible, item)
 		}
 	}
 	writeJSON(w, http.StatusOK, visible)

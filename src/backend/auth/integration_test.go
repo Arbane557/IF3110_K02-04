@@ -140,6 +140,12 @@ func TestDatabasePermissionsAndRevocationIntegration(t *testing.T) {
 	}
 	access := NewAccessService(fixture.SQL)
 	principal := Principal{UserID: user.ID}
+	adminPrincipal := Principal{UserID: user.ID, IsPlatformAdmin: true}
+	for _, action := range []string{ActionView, ActionEdit} {
+		if err := access.AuthorizeDatabase(ctx, adminPrincipal, databaseID, action); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("administrative role granted target access without a group: %v", err)
+		}
+	}
 	if err := access.AuthorizeDatabase(ctx, principal, databaseID, ActionView); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("no grant error=%v", err)
 	}

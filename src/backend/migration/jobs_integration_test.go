@@ -18,7 +18,7 @@ import (
 	"wbd/backend/internal/testutil"
 )
 
-func asyncFixture(t *testing.T) (*Service, *testutil.Database) {
+func asyncFixture(t *testing.T, manualApprovals ...bool) (*Service, *testutil.Database) {
 	t.Helper()
 	platform := testutil.NewDatabase(t, true)
 	target := testutil.NewDatabase(t, false)
@@ -30,7 +30,32 @@ func asyncFixture(t *testing.T) (*Service, *testutil.Database) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(manualApprovals) == 0 {
+		_, err = platform.SQL.Exec(`
+            INSERT INTO groups(id,name,leader_user_id) VALUES (1,'Editors',1);
+            INSERT INTO group_members(group_id,user_id) VALUES (1,1);
+            INSERT INTO group_database_permissions(group_id,database_id,access_level) VALUES (1,1,'edit');`)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	return NewService(platform.SQL, integrationPool{target.Pool}), target
+}
+
+func submitApprovedFixtureJob(s *Service, ctx context.Context, version int64, direction string, options BatchOptions) (Job, error) {
+	job, err := s.SubmitJob(ctx, 1, version, 1, direction, options)
+	if err != nil {
+		return job, err
+	}
+	return s.ApproveJob(ctx, 1, job.ID, 1)
+}
+
+func recoverApprovedFixtureJob(s *Service, ctx context.Context, id int64, cancel bool) (Job, error) {
+	job, err := s.RecoverJob(ctx, 1, id, 1, cancel)
+	if err != nil {
+		return job, err
+	}
+	return s.ApproveJob(ctx, 1, job.ID, 1)
 }
 
 func requireJobStatus(t *testing.T, s *Service, id int64, status string) Job {
@@ -68,9 +93,10 @@ func TestTargetMetadataAddsExecutionAndCursorToExistingCheckpoints(t *testing.T)
 
 func TestAsyncMigrationApprovalAndCommitRecovery(t *testing.T) {
 	ctx := context.Background()
-	s, target := asyncFixture(t)
+	s, target := asyncFixture(t, true)
 	if _, err := s.internalDB.Exec(`
         INSERT INTO groups(id,name,leader_user_id) VALUES (1,'Editors',2),(2,'Viewers',3);
+        INSERT INTO group_members(group_id,user_id) VALUES (1,1),(1,2),(2,3);
         INSERT INTO group_database_permissions(group_id,database_id,access_level) VALUES (1,1,'edit'),(2,1,'view');`); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +183,7 @@ func TestAsyncBatchResumeAndCompensation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			j, err := s.SubmitJob(ctx, 1, m.Version, 1, "up", BatchOptions{"batch", "items", 2})
+			j, err := submitApprovedFixtureJob(s, ctx, m.Version, "up", BatchOptions{"batch", "items", 2})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -176,7 +202,7 @@ func TestAsyncBatchResumeAndCompensation(t *testing.T) {
 			if _, err = target.Pool.Exec(ctx, "ALTER TABLE items DROP CONSTRAINT fail_batch"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err = s.RecoverJob(ctx, 1, j.ID, 1, cancel); err != nil {
+			if _, err = recoverApprovedFixtureJob(s, ctx, j.ID, cancel); err != nil {
 				t.Fatal(err)
 			}
 			if err = s.processJob(ctx, j.ID); err != nil {
@@ -192,7 +218,7 @@ func TestAsyncBatchResumeAndCompensation(t *testing.T) {
 			}
 			if !cancel {
 				for _, direction := range []string{"rollback", "forward"} {
-					next, err := s.SubmitJob(ctx, 1, m.Version, 1, direction, BatchOptions{})
+					next, err := submitApprovedFixtureJob(s, ctx, m.Version, direction, BatchOptions{})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -218,7 +244,7 @@ func TestAsyncBatchCompensationResumesFromCommittedCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := s.SubmitJob(ctx, 1, m.Version, 1, "up", BatchOptions{"batch", "items", 2})
+	job, err := submitApprovedFixtureJob(s, ctx, m.Version, "up", BatchOptions{"batch", "items", 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +283,7 @@ func TestAsyncBatchCompensationResumesFromCommittedCheckpoint(t *testing.T) {
         FOR EACH ROW EXECUTE FUNCTION reject_middle_compensation()`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.RecoverJob(ctx, 1, job.ID, 1, true); err != nil {
+	if _, err = recoverApprovedFixtureJob(s, ctx, job.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.processJob(ctx, job.ID); err != nil {
@@ -275,7 +301,7 @@ func TestAsyncBatchCompensationResumesFromCommittedCheckpoint(t *testing.T) {
 	if _, err = target.Pool.Exec(ctx, "DROP TRIGGER reject_middle_compensation ON items; DROP FUNCTION reject_middle_compensation()"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.RecoverJob(ctx, 1, job.ID, 1, false); err != nil {
+	if _, err = recoverApprovedFixtureJob(s, ctx, job.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.processJob(ctx, job.ID); err != nil {
@@ -319,7 +345,7 @@ func TestAsyncRabbitMQDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	j, err := s.SubmitJob(ctx, 1, m.Version, 1, "up", BatchOptions{})
+	j, err := submitApprovedFixtureJob(s, ctx, m.Version, "up", BatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +387,7 @@ func TestAsyncRollbackForwardHistoryIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, direction := range []string{"up", "rollback", "forward"} {
-		job, err := s.SubmitJob(ctx, 1, m.Version, 1, direction, BatchOptions{})
+		job, err := submitApprovedFixtureJob(s, ctx, m.Version, direction, BatchOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -410,7 +436,7 @@ func TestAsyncFailedRollbackPreservesActiveStateAndHistoryIntegration(t *testing
 		t.Fatal(err)
 	}
 	for _, direction := range []string{"up", "rollback"} {
-		job, err := s.SubmitJob(ctx, 1, m.Version, 1, direction, BatchOptions{})
+		job, err := submitApprovedFixtureJob(s, ctx, m.Version, direction, BatchOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -490,7 +516,7 @@ func TestLargeDataBatchPerformance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	j, err := s.SubmitJob(ctx, 1, m.Version, 1, "up", BatchOptions{"batch", "items", batchSize})
+	j, err := submitApprovedFixtureJob(s, ctx, m.Version, "up", BatchOptions{"batch", "items", batchSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,11 +561,11 @@ func TestAsyncDatabaseLockAndQueueOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	one, err := s.SubmitJob(ctx, 1, first.Version, 1, "up", BatchOptions{})
+	one, err := submitApprovedFixtureJob(s, ctx, first.Version, "up", BatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	two, err := s.SubmitJob(ctx, 1, second.Version, 1, "up", BatchOptions{})
+	two, err := submitApprovedFixtureJob(s, ctx, second.Version, "up", BatchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +598,7 @@ func TestAsyncDatabaseLockAndQueueOrder(t *testing.T) {
 
 func TestAsyncWorkerRevalidatesActorAccessIntegration(t *testing.T) {
 	ctx := context.Background()
-	s, target := asyncFixture(t)
+	s, target := asyncFixture(t, true)
 	if _, err := s.internalDB.Exec(`
         INSERT INTO groups(id,name,leader_user_id) VALUES(1,'Editors',2);
         INSERT INTO group_members(group_id,user_id) VALUES(1,2);

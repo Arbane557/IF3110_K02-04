@@ -61,9 +61,9 @@ func (t poolAcquireTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, dat
 	if !ok {
 		return ctx
 	}
-	query := info.query
-	if query == "" {
-		query = strings.TrimSpace(data.SQL)
+	query := strings.TrimSpace(data.SQL)
+	if info.query != "" && query != "begin read only" && query != "rollback" {
+		query = info.query
 	}
 	parameters := make([]any, len(data.Args))
 	for i, arg := range data.Args {
