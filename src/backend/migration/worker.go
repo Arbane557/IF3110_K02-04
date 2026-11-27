@@ -367,7 +367,11 @@ func (s *Service) revalidateJob(ctx context.Context, j Job) error {
 			}
 		}
 	case "forward":
-		if m.Active || m.Status == "draft" || j.Version != latest+1 {
+		next, err := s.nextForwardVersion(ctx, j.DatabaseID, latest)
+		if err != nil {
+			return err
+		}
+		if j.Version != next {
 			return ErrForwardNotNext
 		}
 	case "up":

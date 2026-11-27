@@ -351,6 +351,11 @@ func TestAsyncRollbackForwardHistoryIntegration(t *testing.T) {
 	if _, err := target.Pool.Exec(ctx, "CREATE TABLE items(id bigint PRIMARY KEY, value int); INSERT INTO items VALUES(1,0)"); err != nil {
 		t.Fatal(err)
 	}
+	for i := 0; i < 2; i++ {
+		if _, err := s.Create(ctx, 1, 1, "SELECT 1"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	m, err := s.CreateWithDown(ctx, 1, 1, "UPDATE items SET value=value+1", "UPDATE items SET value=value-1", false, "")
 	if err != nil {
 		t.Fatal(err)

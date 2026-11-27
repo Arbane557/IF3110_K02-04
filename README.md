@@ -196,6 +196,32 @@ Request body:
 
 Implementasi saat ini memakai `EXPLAIN`, sehingga menampilkan rencana dan estimasi PostgreSQL. `EXPLAIN ANALYZE` belum digunakan karena menjalankan query sungguhan dan dapat mengubah data bila SQL draft bersifat mutatif.
 
+## Log dan trace query read-only
+
+Setiap query katalog dan preview `EXPLAIN` mencatat event `database.query.started`
+dan `database.query.finished` ke JSON stdout. Kedua event memakai ID trace dan span
+query yang sama. Parameter teks, nama tabel yang disisipkan ke SQL, isi SQL draft,
+dan pesan mentah PostgreSQL disamarkan.
+
+Contoh log hasil query:
+
+```json
+{"time":"2026-11-26T10:00:00Z","level":"INFO","msg":"database.query.finished","event":"database.query.finished","actor":7,"database":5,"query":"SELECT * FROM <redacted table> LIMIT $1 OFFSET $2","parameters":[50,0],"duration_ms":2,"rows":12,"status":"success","trace_id":"0123456789abcdef0123456789abcdef","span_id":"0123456789abcdef","correlation_id":"0123456789abcdef0123456789abcdef"}
+```
+
+Di Tempo, buka `trace_id` tersebut untuk melihat span anak `database.query`
+di bawah span HTTP. Span memiliki event `database.query.result` yang membawa
+status, durasi, dan jumlah baris jika tersedia. Saat query gagal, event dan span
+mencatat error yang sudah disamarkan serta SQLSTATE jika tersedia.
+
+Contoh ringkasan span di Tempo:
+
+```text
+database.query  status=OK  duration=2ms
+  trace_id=0123456789abcdef0123456789abcdef  span_id=0123456789abcdef
+  event database.query.result  status=success  duration_ms=2  rows=12
+```
+
 ## Testing
 
 Jalankan unit test tanpa database:
@@ -219,6 +245,38 @@ Panduan fixture dan update test: [test.md](test.md). Syarat unit/integration unt
 
 Untuk pengujian beban bertahap API dan migration menggunakan k6, lihat
 [panduan dan template hasil stress testing](testing/k6/README.md).
+
+### Benchmark migration data besar (Milestone 2)
+
+Pengujian lokal memakai PostgreSQL 17.12 di Docker dan Go 1.26.2 pada Windows
+amd64. Hasil `TestLargeDataBatchPerformance`:
+
+| Jumlah baris | UPDATE tanpa batching | Migration per batch | Ukuran batch | Batch yang commit |
+| ---: | ---: | ---: | ---: | ---: |
+| 500.000 | 1,2192905 detik | 8,1206757 detik | 10.000 baris | 50 |
+
+Test menjalankan satu `UPDATE items SET processed=true` dan memverifikasi
+bahwa seluruh 500.000 baris berubah. Durasi UPDATE melebihi ambang **1 detik**.
+Test kemudian mengembalikan `processed` ke `false` pada tabel dan ID yang sama,
+lalu menjalankan migration batch lewat worker. Durasi batch mencakup persiapan
+scope, checkpoint, dan commit. Setelah selesai, test memverifikasi 50 batch
+berhasil commit dan seluruh 500.000 baris kembali bernilai `processed=true`.
+
+Dari root repo, arahkan URL ke PostgreSQL khusus tes:
+
+```powershell
+$env:INTEGRATION_DATABASE_URL = 'postgres://app:secret@localhost:55433/wbd_test?sslmode=disable'
+$env:RUN_MIGRATION_PERF = '1'
+cd src/backend
+go test -tags=integration -count=1 -run '^TestLargeDataBatchPerformance$' -timeout=3m -v ./migration
+```
+
+Output run di atas:
+
+```text
+postgres_version_num=170012 rows=500000 full_update=1.2192905s batched_update=8.1206757s batch_size=10000 batches=50
+--- PASS: TestLargeDataBatchPerformance (12.84s)
+```
 
 ## Continuous Integration
 

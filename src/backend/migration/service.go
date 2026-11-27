@@ -507,7 +507,11 @@ func (s *Service) Forward(ctx context.Context, databaseID database.DatabaseID, v
 		databaseID).Scan(&latest); err != nil {
 		return Migration{}, ErrMigrationStore
 	}
-	if version != latest+1 {
+	next, err := s.nextForwardVersion(ctx, databaseID, latest)
+	if err != nil {
+		return Migration{}, err
+	}
+	if version != next {
 		return Migration{}, ErrForwardNotNext
 	}
 
@@ -556,6 +560,18 @@ func (s *Service) Forward(ctx context.Context, databaseID database.DatabaseID, v
 	now := time.Now()
 	item.ExecutedAt = &now
 	return item, nil
+}
+
+// Draft versions reserve numbers without changing the target database.
+func (s *Service) nextForwardVersion(ctx context.Context, databaseID database.DatabaseID, latestActive int64) (int64, error) {
+	var version int64
+	err := s.internalDB.QueryRowContext(ctx, `SELECT COALESCE(MIN(version),0) FROM migrations
+        WHERE database_id=$1 AND version>$2 AND NOT active
+          AND status IN ('success', 'rolled_back', 'failed')`, databaseID, latestActive).Scan(&version)
+	if err != nil {
+		return 0, ErrMigrationStore
+	}
+	return version, nil
 }
 
 func (s *Service) ListHistory(ctx context.Context, databaseID database.DatabaseID, hideRollback bool) ([]HistoryEntry, error) {

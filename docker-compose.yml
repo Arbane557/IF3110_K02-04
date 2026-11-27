@@ -52,7 +52,9 @@ services:
         condition: service_started
 
   rabbitmq:
-    image: rabbitmq:4.1
+    image: rabbitmq:4.1-management
+    ports:
+      - "127.0.0.1:15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: migration
       RABBITMQ_DEFAULT_PASS: migration
@@ -81,7 +83,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    
+
   target-db-1:
     image: postgres:17
     environment:
