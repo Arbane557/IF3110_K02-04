@@ -2,13 +2,23 @@ package main
 
 import "net/http"
 
+func workerMetricsRoutes(metrics http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", metrics)
+	return mux
+}
+
 func (app *App) routes() http.Handler {
 	mux := http.NewServeMux()
 	app.registerPageRoutes(mux)
 	app.registerAuthRoutes(mux)
 	app.registerDatabaseRoutes(mux)
 	app.registerMigrationRoutes(mux)
+	if app.Metrics != nil {
+		mux.Handle("GET /metrics", app.Metrics)
+	}
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+	mux.Handle("GET /views/", http.StripPrefix("/views/", http.FileServer(http.Dir("templates"))))
 	return mux
 }
 
@@ -79,4 +89,12 @@ func (app *App) registerMigrationRoutes(mux *http.ServeMux) {
 	mux.Handle("PUT /api/databases/{databaseID}/migrations/{version}", change(migration.UpdateMigration))
 	mux.Handle("POST /api/databases/{databaseID}/migrations/explain", change(migration.ExplainMigration))
 	mux.Handle("POST /api/databases/{databaseID}/migrations/{version}/execute", change(migration.ExecuteMigration))
+	mux.Handle("POST /api/databases/{databaseID}/migrations/{version}/rollback", change(migration.RollbackMigration))
+	mux.Handle("POST /api/databases/{databaseID}/migrations/{version}/forward", change(migration.ForwardMigration))
+	mux.Handle("GET /api/databases/{databaseID}/migrations/history", get(migration.ListHistory))
+	mux.Handle("GET /api/databases/{databaseID}/jobs", get(migration.Jobs))
+	mux.Handle("GET /api/databases/{databaseID}/jobs/{jobID}", get(migration.Job))
+	mux.Handle("POST /api/databases/{databaseID}/jobs/{jobID}/approve", change(migration.ApproveJob))
+	mux.Handle("POST /api/databases/{databaseID}/jobs/{jobID}/resume", change(migration.ResumeJob))
+	mux.Handle("POST /api/databases/{databaseID}/jobs/{jobID}/cancel", change(migration.CancelJob))
 }

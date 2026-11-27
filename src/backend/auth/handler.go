@@ -103,25 +103,25 @@ func (h *Handler) RequireCSRF(next http.Handler) http.Handler {
 
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		h.renderLogin(w, r, http.StatusBadRequest, "Bad request")
+		h.loginError(w, r, http.StatusBadRequest, "Bad request")
 		return
 	}
 	user, passwordHash, err := h.service.FindUserByUsername(r.Context(), r.FormValue("username"))
 	if errors.Is(err, sql.ErrNoRows) {
-		h.renderLogin(w, r, http.StatusUnauthorized, "Wrong username or password")
+		h.loginError(w, r, http.StatusUnauthorized, "Wrong username or password")
 		return
 	}
 	if err != nil {
-		h.renderLogin(w, r, http.StatusInternalServerError, "Server error")
+		h.loginError(w, r, http.StatusInternalServerError, "Server error")
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(r.FormValue("password"))) != nil {
-		h.renderLogin(w, r, http.StatusUnauthorized, "Wrong username or password")
+		h.loginError(w, r, http.StatusUnauthorized, "Wrong username or password")
 		return
 	}
 	token, expiresAt, err := h.service.CreateSession(r.Context(), user)
 	if err != nil {
-		h.renderLogin(w, r, http.StatusInternalServerError, "Server error")
+		h.loginError(w, r, http.StatusInternalServerError, "Server error")
 		return
 	}
 	setSessionCookie(w, r, token, expiresAt)
@@ -130,7 +130,19 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if user.Role == RoleAdmin {
 		destination = "/auth"
 	}
+	if r.Header.Get("X-SPA-Navigation") == "true" {
+		writeJSON(w, http.StatusOK, map[string]string{"redirect": destination})
+		return
+	}
 	http.Redirect(w, r, destination, http.StatusSeeOther)
+}
+
+func (h *Handler) loginError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	if r.Header.Get("X-SPA-Navigation") == "true" {
+		writeError(w, status, message)
+		return
+	}
+	h.renderLogin(w, r, status, message)
 }
 
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +153,14 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	clearSessionCookie(w, r)
+	if r.Header.Get("X-SPA-Navigation") == "true" {
+		if _, err := issueCSRFCookie(w, r); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not rotate csrf token")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"redirect": "/login"})
+		return
+	}
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
@@ -213,15 +233,15 @@ func (h *Handler) MakeUserAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) UsersPage(w http.ResponseWriter, r *http.Request) {
-	h.renderTemplate(w, "users.html", map[string]string{"CSRFToken": CSRFTokenFromRequest(r)})
+	h.renderTemplate(w, "spa.html", nil)
 }
 
 func (h *Handler) GroupsPage(w http.ResponseWriter, r *http.Request) {
-	h.renderTemplate(w, "groups.html", map[string]string{"CSRFToken": CSRFTokenFromRequest(r)})
+	h.renderTemplate(w, "spa.html", nil)
 }
 
 func (h *Handler) GroupPage(w http.ResponseWriter, r *http.Request) {
-	h.renderTemplate(w, "group.html", map[string]string{"CSRFToken": CSRFTokenFromRequest(r)})
+	h.renderTemplate(w, "spa.html", nil)
 }
 
 func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
@@ -235,14 +255,17 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Name string `json:"name"`
+		Name         string `json:"name"`
+		LeaderUserID int64  `json:"leaderUserId"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	group, err := h.service.CreateGroup(r.Context(), request.Name)
+	group, err := h.service.CreateGroup(r.Context(), request.Name, request.LeaderUserID)
 	if errors.Is(err, ErrInvalidGroup) {
-		writeError(w, http.StatusBadRequest, "group name is required and must be at most 100 characters")
+		writeError(w, http.StatusBadRequest, "group name and leader are required")
+	} else if errors.Is(err, ErrInvalidLeader) {
+		writeError(w, http.StatusBadRequest, "leader user does not exist")
 	} else if isUniqueViolation(err) {
 		writeError(w, http.StatusConflict, "group name already exists")
 	} else if err != nil {
@@ -304,6 +327,10 @@ func (h *Handler) RemoveGroupMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.service.RemoveGroupMember(r.Context(), groupID, userID); err != nil {
+		if errors.Is(err, ErrLeaderRemoval) {
+			writeError(w, http.StatusConflict, "change the group leader before removing this member")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "could not remove group member")
 		return
 	}
@@ -372,14 +399,14 @@ func (h *Handler) AuthPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) renderLogin(w http.ResponseWriter, r *http.Request, status int, message string) {
-	token, err := ensureCSRFCookie(w, r)
+	_, err := ensureCSRFCookie(w, r)
 	if err != nil {
 		http.Error(w, "could not create csrf token", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(status)
-	data := map[string]string{"Error": message, "CSRFToken": token}
-	if err := h.templates.ExecuteTemplate(w, "login.html", data); err != nil {
+	_ = message
+	if err := h.templates.ExecuteTemplate(w, "spa.html", nil); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }
@@ -409,6 +436,10 @@ func ensureCSRFCookie(w http.ResponseWriter, r *http.Request) (string, error) {
 	if cookie, err := r.Cookie(csrfCookieName); err == nil && cookie.Value != "" {
 		return cookie.Value, nil
 	}
+	return issueCSRFCookie(w, r)
+}
+
+func issueCSRFCookie(w http.ResponseWriter, r *http.Request) (string, error) {
 	random := make([]byte, 32)
 	if _, err := rand.Read(random); err != nil {
 		return "", err

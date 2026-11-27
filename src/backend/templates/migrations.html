@@ -27,31 +27,61 @@
         </section>
 
         <section>
-            <h2>Migration history</h2>
+            <h2>Migrations</h2>
             <div class="table-wrap">
                 <table>
                     <thead>
                         <tr><th>Version</th><th>Created by</th><th>Executed by</th><th>Time</th><th>Status</th></tr>
                     </thead>
                     <tbody id="migration-list">
-                        <tr><td colspan="5">Select a database to load migration history.</td></tr>
+                        <tr><td colspan="5">Select a database to load migrations.</td></tr>
                     </tbody>
                 </table>
             </div>
         </section>
 
         <section>
+            <h2>Migration history</h2>
+            <label><input type="checkbox" id="hide-rollback"> Hide rollback</label>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr><th>Execution</th><th>Version</th><th>Direction</th><th>User</th><th>Time</th><th>Status</th><th>SQL</th></tr>
+                    </thead>
+                    <tbody id="execution-history-list">
+                        <tr><td colspan="7">Select a database to load execution history.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        <section><h2>Migration jobs</h2><ul id="job-list"></ul></section>
+
+        <section>
             <h2>Migration SQL</h2>
             <p id="editor-help">Select a migration to view its SQL.</p>
             <label for="migration-sql">SQL</label>
             <textarea id="migration-sql" rows="14" spellcheck="false" placeholder="Select a migration or start a new draft." readonly></textarea>
+            <label for="migration-down-sql">SQL Down (leave empty if irreversible)</label>
+            <textarea id="migration-down-sql" rows="6" spellcheck="false" placeholder="SQL to roll back this migration." readonly></textarea>
+            <label for="irreversible-reason">Irreversible reason</label>
+            <input id="irreversible-reason" type="text" placeholder="Required when no SQL down is provided" readonly>
             <div class="migration-actions">
                 <button id="new-migration" type="button" hidden>New draft</button>
                 <button id="save-migration" type="button" hidden disabled>Save draft</button>
                 <button id="preview-plan" type="button" hidden disabled>Preview plan</button>
                 <button id="execute-migration" type="button" hidden disabled>Execute migration</button>
+                <button id="rollback-migration" type="button" hidden disabled>Rollback migration</button>
+                <button id="forward-migration" type="button" hidden disabled>Forward migration</button>
+            </div>
+            <div id="batch-options" class="form-grid" hidden>
+                <label>Execution mode<select id="execution-mode"><option value="normal">Normal</option><option value="batch">Batch</option></select></label>
+                <label>Batch table (unique bigint id)<input id="batch-table" placeholder="items"></label>
+                <label>Batch size<input id="batch-size" type="number" min="1" max="10000" value="1000"></label>
             </div>
             <p id="editor-status" class="status" role="status" aria-live="polite"></p>
+            <button id="resume-job" type="button" hidden>Resume partial job</button>
+            <button id="cancel-partial-job" type="button" hidden>Revert committed batches</button>
+            <button id="approve-job" type="button" hidden>Approve job (group leader)</button>
             <section id="plan-section" hidden>
                 <h3>Query plan</h3>
                 <pre id="plan-output"></pre>
@@ -62,6 +92,7 @@
         const databaseSelect = document.querySelector("#database-select");
         const migrationStatus = document.querySelector("#migration-status");
         const migrationList = document.querySelector("#migration-list");
+        const executionHistoryList = document.querySelector("#execution-history-list");
         const sqlEditor = document.querySelector("#migration-sql");
         const editorHelp = document.querySelector("#editor-help");
         const editorStatus = document.querySelector("#editor-status");
@@ -69,12 +100,116 @@
         const saveButton = document.querySelector("#save-migration");
         const previewButton = document.querySelector("#preview-plan");
         const executeButton = document.querySelector("#execute-migration");
+        const rollbackButton = document.querySelector("#rollback-migration");
+        const forwardButton = document.querySelector("#forward-migration");
+        const downSqlEditor = document.querySelector("#migration-down-sql");
+        const irreversibleReason = document.querySelector("#irreversible-reason");
+        const hideRollback = document.querySelector("#hide-rollback");
         const planSection = document.querySelector("#plan-section");
         const planOutput = document.querySelector("#plan-output");
+        const resumeJobButton = document.querySelector("#resume-job");
+        const cancelPartialButton = document.querySelector("#cancel-partial-job");
+        const approveJobButton = document.querySelector("#approve-job");
+        let pendingApprovalJob = null;
+        approveJobButton.addEventListener("click", async () => {
+            if (!pendingApprovalJob) return;
+            try {
+                const job = await requestJSON(`/api/databases/${pendingApprovalJob.databaseId}/jobs/${pendingApprovalJob.jobId}/approve`, {method:"POST"});
+                editorStatus.textContent = `Approval recorded; job ${job.jobId} is ${job.status}.`;
+                approveJobButton.hidden = true;
+            } catch (error) {editorStatus.textContent = error.message;}
+        });
+        let resumableJob = null;
+        resumeJobButton.addEventListener("click", async () => {
+            if (!resumableJob) return;
+            try {
+                const job = await requestJSON(`/api/databases/${resumableJob.databaseId}/jobs/${resumableJob.jobId}/resume`, { method: "POST" });
+                resumeJobButton.hidden = true;
+                await watchJob(job);
+            } catch (error) { editorStatus.textContent = error.message; }
+        });
+        cancelPartialButton.addEventListener("click", async () => {
+            if (!resumableJob || !confirm("Revert committed batches using the saved SQL down?")) return;
+            try {
+                const job = await requestJSON(`/api/databases/${resumableJob.databaseId}/jobs/${resumableJob.jobId}/cancel`, { method: "POST" });
+                cancelPartialButton.hidden = true;
+                resumeJobButton.hidden = true;
+                await watchJob(job);
+            } catch (error) { editorStatus.textContent = error.message; }
+        });
+        const batchOptions = document.querySelector("#batch-options");
         let currentDatabase = null;
         let currentVersion = null;
         let currentStatus = "";
+        let currentActive = false;
+        let currentReversible = false;
         let migrations = [];
+
+        async function loadJobs() {
+            const list = document.querySelector("#job-list");
+            list.replaceChildren();
+            if (!currentDatabase) return;
+            try {
+                const jobs = await requestJSON(`/api/databases/${currentDatabase.id}/jobs`);
+                for (const job of jobs) {
+                    const item = document.createElement("li");
+                    item.textContent = `Job ${job.jobId}: migration ${job.version} ${job.direction}, ${job.status}; ${job.batchesDone} batches, ${job.rowsDone} rows. `;
+                    if (job.status === "pending_review") {
+                        const button = document.createElement("button");
+                        button.type = "button";
+                        button.textContent = "Approve (leader)";
+                        button.addEventListener("click", async () => {
+                            try { await requestJSON(`/api/databases/${job.databaseId}/jobs/${job.jobId}/approve`, {method:"POST"}); await loadJobs(); }
+                            catch (error) { migrationStatus.textContent = error.message; }
+                        });
+                        item.append(button);
+                    }
+                    if (["pending", "running", "partial", "uncertain", "partially_reverted"].includes(job.status)) {
+                        const monitor = document.createElement("button");
+                        monitor.type = "button";
+                        monitor.textContent = "View job";
+                        monitor.addEventListener("click", () => {
+                            watchJob(job).catch(error => { migrationStatus.textContent = error.message; });
+                        });
+                        item.append(monitor);
+                    }
+                    list.append(item);
+                }
+            } catch (error) { migrationStatus.textContent = error.message; }
+        }
+
+        let watchGeneration = 0;
+        window.addEventListener("spa:navigated", () => { watchGeneration += 1; }, { once: true });
+
+        async function watchJob(job) {
+            const generation = ++watchGeneration;
+            resumableJob = null;
+            resumeJobButton.hidden = true;
+            cancelPartialButton.hidden = true;
+            editorStatus.textContent = `Job ${job.jobId}: ${job.status}`;
+            pendingApprovalJob = job.status === "pending_review" ? job : null;
+            approveJobButton.hidden = !pendingApprovalJob;
+            while (true) {
+                if (generation !== watchGeneration || currentDatabase?.id !== job.databaseId) return;
+                const current = await requestJSON(`/api/databases/${job.databaseId}/jobs/${job.jobId}`);
+                if (generation !== watchGeneration || currentDatabase?.id !== job.databaseId) return;
+                pendingApprovalJob = current.status === "pending_review" ? current : null;
+                approveJobButton.hidden = !pendingApprovalJob;
+                editorStatus.textContent = `Job ${current.jobId}: ${current.status}; ${current.batchesDone} batches, ${current.rowsDone} rows committed${current.errorMessage ? ` — ${current.errorMessage}` : ""}`;
+                if (!["pending_review", "pending", "running"].includes(current.status)) {
+                    resumableJob = ["partial", "uncertain", "partially_reverted"].includes(current.status) ? current : null;
+                    resumeJobButton.hidden = !resumableJob || currentDatabase?.accessLevel !== "edit";
+                    cancelPartialButton.hidden = current.status !== "partial" || current.mode !== "batch" || currentDatabase?.accessLevel !== "edit";
+                    await loadHistory();
+                    await loadExecutionHistory();
+                    await loadJobs();
+                    if (currentDatabase?.id == current.databaseId) await loadMigration(current.version);
+                    editorStatus.textContent = `Job ${current.jobId}: ${current.status}; ${current.batchesDone} batches, ${current.rowsDone} rows committed${current.errorMessage ? ` — ${current.errorMessage}` : ""}`;
+                    return;
+                }
+                await new Promise(resolve => setTimeout(resolve, 1500));
+            }
+        }
 
         async function requestJSON(url, options = {}) {
             const method = (options.method || "GET").toUpperCase();
@@ -90,10 +225,17 @@
             const canEdit = currentDatabase?.accessLevel === "edit";
             const isDraft = currentVersion === null || currentStatus === "draft";
             sqlEditor.readOnly = !canEdit || !isDraft;
+            downSqlEditor.readOnly = !canEdit || !isDraft;
+            irreversibleReason.readOnly = !canEdit || !isDraft;
             newButton.hidden = !canEdit;
             saveButton.hidden = !canEdit;
             previewButton.hidden = !canEdit || !isDraft;
             executeButton.hidden = !canEdit || currentVersion === null || currentStatus !== "draft";
+            batchOptions.hidden = executeButton.hidden;
+            rollbackButton.hidden = !canEdit || currentVersion === null;
+            rollbackButton.disabled = !canEdit || currentStatus !== "success" || !currentActive || !currentReversible;
+            forwardButton.hidden = !canEdit || currentVersion === null;
+            forwardButton.disabled = !canEdit || currentActive || currentStatus === "draft" || currentStatus === "running";
             saveButton.disabled = !canEdit || !isDraft || !sqlEditor.value.trim();
             previewButton.disabled = !canEdit || !isDraft || !sqlEditor.value.trim();
             executeButton.disabled = !canEdit || currentVersion === null || currentStatus !== "draft";
@@ -102,7 +244,11 @@
         function resetEditor() {
             currentVersion = null;
             currentStatus = "";
+            currentActive = false;
+            currentReversible = false;
             sqlEditor.value = "";
+            downSqlEditor.value = "";
+            irreversibleReason.value = "";
             editorHelp.textContent = currentDatabase?.accessLevel === "edit"
                 ? "Select a migration or start a new draft."
                 : "View Only access: you can inspect migration SQL and history.";
@@ -155,7 +301,11 @@
                 const migration = await requestJSON(`/api/databases/${currentDatabase.id}/migrations/${version}`);
                 currentVersion = migration.version;
                 currentStatus = migration.status;
+                currentActive = migration.active;
+                currentReversible = migration.reversible;
                 sqlEditor.value = migration.sql;
+                downSqlEditor.value = migration.sqlDown || "";
+                irreversibleReason.value = migration.irreversibleReason || "";
                 planSection.hidden = true;
                 planOutput.textContent = "";
                 editorHelp.textContent = `Version ${migration.version} - ${migration.status}`;
@@ -163,6 +313,40 @@
                 updateEditorControls();
             } catch (error) {
                 editorStatus.textContent = error.message;
+            }
+        }
+
+        async function loadExecutionHistory() {
+            if (!currentDatabase) return;
+            try {
+                const entries = await requestJSON(
+                    `/api/databases/${currentDatabase.id}/migrations/history?hideRollback=${hideRollback.checked}`,
+                );
+                executionHistoryList.replaceChildren();
+                if (entries.length === 0) {
+                    executionHistoryList.innerHTML = '<tr><td colspan="7">No migration attempts yet.</td></tr>';
+                    return;
+                }
+                for (const entry of entries) {
+                    const row = document.createElement("tr");
+                    const values = [
+                        entry.executionId,
+                        entry.version,
+                        entry.direction,
+                        entry.userId,
+                        new Date(entry.executedAt || entry.startedAt).toLocaleString(),
+                        entry.status,
+                        entry.sql,
+                    ];
+                    for (const value of values) {
+                        const cell = document.createElement("td");
+                        cell.textContent = value ?? "-";
+                        row.append(cell);
+                    }
+                    executionHistoryList.append(row);
+                }
+            } catch (error) {
+                migrationStatus.textContent = error.message;
             }
         }
 
@@ -187,6 +371,12 @@
         }
 
         databaseSelect.addEventListener("change", async () => {
+            watchGeneration++;
+            pendingApprovalJob = null;
+            resumableJob = null;
+            approveJobButton.hidden = true;
+            resumeJobButton.hidden = true;
+            cancelPartialButton.hidden = true;
             const option = databaseSelect.selectedOptions[0];
             currentDatabase = databaseSelect.value
                 ? { id: databaseSelect.value, accessLevel: option.dataset.accessLevel }
@@ -200,12 +390,16 @@
             }
             updateEditorControls();
             await loadHistory();
+            await loadExecutionHistory();
+            await loadJobs();
         });
 
         sqlEditor.addEventListener("input", () => {
             planSection.hidden = true;
             updateEditorControls();
         });
+
+        hideRollback.addEventListener("change", loadExecutionHistory);
 
         newButton.addEventListener("click", () => {
             resetEditor();
@@ -222,7 +416,12 @@
                 const migration = await requestJSON(url, {
                     method: isUpdate ? "PUT" : "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ sql: sqlEditor.value }),
+                    body: JSON.stringify({
+                        sql: sqlEditor.value,
+                        sqlDown: downSqlEditor.value,
+                        irreversible: !downSqlEditor.value.trim(),
+                        irreversibleReason: irreversibleReason.value,
+                    }),
                 });
                 currentVersion = migration.version;
                 currentStatus = migration.status;
@@ -263,19 +462,58 @@
             const version = currentVersion;
             if (!confirm(`Execute migration ${version} on ${databaseSelect.selectedOptions[0].text}?`)) return;
             executeButton.disabled = true;
-            let successMessage = "";
             try {
-                const migration = await requestJSON(
+                const job = await requestJSON(
                     `/api/databases/${currentDatabase.id}/migrations/${version}/execute`,
+                    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+                        mode: document.querySelector("#execution-mode").value,
+                        batchTable: document.querySelector("#batch-table").value,
+                        batchSize: Number(document.querySelector("#batch-size").value),
+                    }) },
+                );
+                await watchJob(job);
+            } catch (error) {
+                editorStatus.textContent = error.message;
+            }
+            executeButton.disabled = false;
+        });
+
+        rollbackButton.addEventListener("click", async () => {
+            if (!currentDatabase || currentVersion === null) return;
+            const version = currentVersion;
+            if (!confirm(`Rollback migration ${version}?`)) return;
+            rollbackButton.disabled = true;
+            try {
+                const job = await requestJSON(
+                    `/api/databases/${currentDatabase.id}/migrations/${version}/rollback`,
                     { method: "POST" },
                 );
-                successMessage = `Migration ${migration.version} executed.`;
+                await watchJob(job);
             } catch (error) {
                 editorStatus.textContent = error.message;
             }
             await loadHistory();
             await loadMigration(version);
-            if (successMessage) editorStatus.textContent = successMessage;
+            await loadExecutionHistory();
+        });
+
+        forwardButton.addEventListener("click", async () => {
+            if (!currentDatabase || currentVersion === null) return;
+            const version = currentVersion;
+            if (!confirm(`Forward migration ${version}?`)) return;
+            forwardButton.disabled = true;
+            try {
+                const job = await requestJSON(
+                    `/api/databases/${currentDatabase.id}/migrations/${version}/forward`,
+                    { method: "POST" },
+                );
+                await watchJob(job);
+            } catch (error) {
+                editorStatus.textContent = error.message;
+            }
+            await loadHistory();
+            await loadMigration(version);
+            await loadExecutionHistory();
         });
 
         fetch("/whoami").then(response => response.json()).then(user => {

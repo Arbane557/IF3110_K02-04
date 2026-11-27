@@ -16,11 +16,25 @@ jobs:
         with:
           go-version: "1.22.x"
       - name: Run unit tests
-        run: go test ./...
+        run: go test -race -count=1 ./...
+      - name: Vet backend
+        run: go vet ./...
 
   integration-test:
     runs-on: ubuntu-latest
     services:
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: integration
+          RABBITMQ_DEFAULT_PASS: integration
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
       postgres:
         image: postgres:17
         env:
@@ -45,4 +59,24 @@ jobs:
       - name: Run integration tests
         env:
           INTEGRATION_DATABASE_URL: postgres://app:secret@localhost:5432/app?sslmode=disable
-        run: go test ./...
+          INTEGRATION_RABBITMQ_URL: amqp://integration:integration@localhost:5672/
+        run: go test -race -tags=integration -shuffle=on -count=2 -timeout=180s ./...
+
+  observability-integration-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      COMPOSE_PROJECT_NAME: wbd-observability-ci
+      CREDENTIAL_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start centralized telemetry storage
+        run: docker compose up -d otel-collector
+      - name: Check Collector to Loki log storage
+        run: docker compose --profile observability-test run --rm observability-test
+      - name: Show telemetry service logs
+        if: failure()
+        run: docker compose logs otel-storage-init otel-collector loki tempo
+      - name: Stop telemetry services
+        if: always()
+        run: docker compose --profile observability-test down

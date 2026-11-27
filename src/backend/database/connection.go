@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"wbd/backend/observability"
 )
 
 // TargetPoolProvider is the connection contract used by migration services.
@@ -21,22 +22,31 @@ type ConnectionManager struct {
 	repository RegistryRepository
 	protector  CredentialProtector
 	mu         sync.Mutex
+	poolsMu    sync.RWMutex
 	pools      map[DatabaseID]*pgxpool.Pool
+	observer   observability.Observer
 }
 
-func NewConnectionManager(repository RegistryRepository, protector CredentialProtector) *ConnectionManager {
-	return &ConnectionManager{
+func NewConnectionManager(repository RegistryRepository, protector CredentialProtector, observers ...observability.Observer) *ConnectionManager {
+	manager := &ConnectionManager{
 		repository: repository,
 		protector:  protector,
 		pools:      make(map[DatabaseID]*pgxpool.Pool),
 	}
+	if len(observers) > 0 {
+		manager.observer = observers[0]
+	}
+	return manager
 }
 
 func (m *ConnectionManager) Pool(ctx context.Context, databaseID DatabaseID) (*pgxpool.Pool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if pool := m.pools[databaseID]; pool != nil {
+	m.poolsMu.RLock()
+	cached := m.pools[databaseID]
+	m.poolsMu.RUnlock()
+	if pool := cached; pool != nil {
 		return pool, nil
 	}
 	record, err := m.repository.FindByID(ctx, databaseID)
@@ -44,35 +54,45 @@ func (m *ConnectionManager) Pool(ctx context.Context, databaseID DatabaseID) (*p
 		return nil, err
 	}
 	password, err := m.protector.Open(record.PasswordCiphertext)
-	if err != nil { return nil, fmt.Errorf("decrypt target password: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("decrypt target password: %w", err)
+	}
 	record.Config.Password = password
-	pool, err := newPool(ctx, record.Config)
+	pool, err := newPool(ctx, record.Config, m.observer)
 	if err != nil {
 		return nil, ErrDatabaseUnavailable
 	}
+	m.poolsMu.Lock()
 	m.pools[databaseID] = pool
+	m.poolsMu.Unlock()
 	return pool, nil
 }
 
 func (m *ConnectionManager) Invalidate(databaseID DatabaseID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if pool := m.pools[databaseID]; pool != nil {
+	m.poolsMu.Lock()
+	pool := m.pools[databaseID]
+	delete(m.pools, databaseID)
+	m.poolsMu.Unlock()
+	if pool != nil {
 		pool.Close()
-		delete(m.pools, databaseID)
 	}
 }
 
 func (m *ConnectionManager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for id, pool := range m.pools {
+	m.poolsMu.Lock()
+	pools := m.pools
+	m.pools = make(map[DatabaseID]*pgxpool.Pool)
+	m.poolsMu.Unlock()
+	for _, pool := range pools {
 		pool.Close()
-		delete(m.pools, id)
 	}
 }
 
-func newPool(ctx context.Context, database DatabaseConfig) (*pgxpool.Pool, error) {
+func newPool(ctx context.Context, database DatabaseConfig, observers ...observability.Observer) (*pgxpool.Pool, error) {
 	dsn := targetDSN(database)
 	config, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -83,6 +103,9 @@ func newPool(ctx context.Context, database DatabaseConfig) (*pgxpool.Pool, error
 	config.MaxConnLifetime = 30 * time.Minute
 	config.MaxConnIdleTime = 5 * time.Minute
 	config.HealthCheckPeriod = time.Minute
+	if len(observers) > 0 && observers[0] != nil {
+		config.ConnConfig.Tracer = poolAcquireTracer{observer: observers[0]}
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -93,6 +116,19 @@ func newPool(ctx context.Context, database DatabaseConfig) (*pgxpool.Pool, error
 		return nil, err
 	}
 	return pool, nil
+}
+
+func (m *ConnectionManager) PoolStats() (active, idle int32) {
+	// Opening or closing a target may block under mu. Scrapes only need the
+	// short-lived map lock and must remain available during that operation.
+	m.poolsMu.RLock()
+	defer m.poolsMu.RUnlock()
+	for _, pool := range m.pools {
+		stats := pool.Stat()
+		active += stats.AcquiredConns()
+		idle += stats.IdleConns()
+	}
+	return
 }
 
 func targetDSN(database DatabaseConfig) string {

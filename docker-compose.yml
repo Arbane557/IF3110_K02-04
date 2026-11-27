@@ -1,14 +1,71 @@
 services:
   backend:
     build: ./src/backend
+    restart: unless-stopped
     ports:
       - "6969:6969"
     environment:
       CREDENTIAL_ENCRYPTION_KEY: "${CREDENTIAL_ENCRYPTION_KEY:?Set CREDENTIAL_ENCRYPTION_KEY in .env}"
       DATABASE_URL: postgres://app:secret@database:5432/app?sslmode=disable
+      OTEL_SERVICE_NAME: wbd-backend
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment=development
+    logging:
+      driver: fluentd
+      options:
+        # The Docker daemon sends stdout/stderr to the Collector's published port.
+        fluentd-address: "127.0.0.1:24224"
+        fluentd-async: "true"
+        tag: wbd-backend
     depends_on:
       database:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  worker:
+    build: ./src/backend
+    command: ["/app/backend", "worker"]
+    restart: unless-stopped
+    expose:
+      - "9091"
+    environment:
+      CREDENTIAL_ENCRYPTION_KEY: "${CREDENTIAL_ENCRYPTION_KEY:?Set CREDENTIAL_ENCRYPTION_KEY in .env}"
+      DATABASE_URL: postgres://app:secret@database:5432/app?sslmode=disable
+      RABBITMQ_URL: amqp://migration:migration@rabbitmq:5672/
+      OTEL_SERVICE_NAME: wbd-migration-worker
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: "127.0.0.1:24224"
+        fluentd-async: "true"
+        tag: wbd-migration-worker
+    depends_on:
+      database:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    ports:
+      - "127.0.0.1:15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: migration
+      RABBITMQ_DEFAULT_PASS: migration
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq.conf:/etc/rabbitmq/conf.d/20-worker.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   database:
     image: postgres:17
@@ -26,7 +83,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    
+
   target-db-1:
     image: postgres:17
     environment:
@@ -37,7 +94,111 @@ services:
       - "5433:5432"
     volumes:
       - target_data:/var/lib/postgresql/data
+      - ./src/backend/db/target-init:/docker-entrypoint-initdb.d:ro
+
+  otel-storage-init:
+    image: busybox:1.37
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - mkdir -p /var/lib/otelcol/queue && chown 10001:10001 /var/lib/otelcol /var/lib/otelcol/queue
+    volumes:
+      - otel_queue_data:/var/lib/otelcol
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    user: "10001:10001"
+    restart: unless-stopped
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+    volumes:
+      - ./observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - otel_queue_data:/var/lib/otelcol
+    ports:
+      - "4318:4318"
+      - "127.0.0.1:24224:24224"
+    depends_on:
+      otel-storage-init:
+        condition: service_completed_successfully
+      tempo:
+        condition: service_started
+      loki:
+        condition: service_started
+
+  loki:
+    image: grafana/loki:3.4.2
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/loki/config.yaml
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/loki
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - backend
+      - worker
+
+  tempo:
+    image: grafana/tempo:2.7.2
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/tempo.yaml
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+
+  observability-test:
+    image: golang:1.22
+    profiles: [observability-test]
+    working_dir: /src
+    command: ["go", "test", "-tags=integration,observability", "-count=1", "-timeout=120s", "./observability"]
+    environment:
+      INTEGRATION_OTEL_HTTP_URL: http://otel-collector:4318
+      INTEGRATION_LOKI_URL: http://loki:3100
+    volumes:
+      - ./src/backend:/src:ro
+    depends_on:
+      otel-collector:
+        condition: service_started
+      loki:
+        condition: service_started
 
 volumes:
+  rabbitmq_data:
   postgres_data:
   target_data:
+  prometheus_data:
+  tempo_data:
+  loki_data:
+  otel_queue_data:
+  grafana_data:

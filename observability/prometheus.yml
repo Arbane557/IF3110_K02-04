@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: wbd-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - backend:6969
+
+  - job_name: wbd-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - worker:9091
