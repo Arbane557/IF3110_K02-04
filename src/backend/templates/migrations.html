@@ -81,7 +81,7 @@
             <p id="editor-status" class="status" role="status" aria-live="polite"></p>
             <button id="resume-job" type="button" hidden>Resume partial job</button>
             <button id="cancel-partial-job" type="button" hidden>Revert committed batches</button>
-            <button id="approve-job" type="button" hidden>Approve job (group leader)</button>
+            <button id="approve-job" type="button" hidden>Approve</button>
             <section id="plan-section" hidden>
                 <h3>Query plan</h3>
                 <pre id="plan-output"></pre>
@@ -163,10 +163,10 @@
                 for (const job of jobs) {
                     const item = document.createElement("li");
                     item.textContent = `Job ${job.jobId}: migration ${job.version} ${job.direction}, ${job.status}; ${job.batchesDone} batches, ${job.rowsDone} rows. `;
-                    if (job.status === "pending_review") {
+                    if (job.status === "pending_review" && job.canApprove) {
                         const button = document.createElement("button");
                         button.type = "button";
-                        button.textContent = "Approve (leader)";
+                        button.textContent = "Approve";
                         button.addEventListener("click", async () => {
                             try {
                                 const approvedJob = await requestJSON(`/api/databases/${job.databaseId}/jobs/${job.jobId}/approve`, {method:"POST"});
@@ -177,15 +177,6 @@
                             catch (error) { migrationStatus.textContent = error.message; }
                         });
                         item.append(button);
-                    }
-                    if (["pending", "running", "partial", "uncertain", "partially_reverted"].includes(job.status)) {
-                        const monitor = document.createElement("button");
-                        monitor.type = "button";
-                        monitor.textContent = "View job";
-                        monitor.addEventListener("click", () => {
-                            watchJob(job).catch(error => { migrationStatus.textContent = error.message; });
-                        });
-                        item.append(monitor);
                     }
                     list.append(item);
                 }
@@ -201,14 +192,14 @@
             resumeJobButton.hidden = true;
             cancelPartialButton.hidden = true;
             editorStatus.textContent = `Job ${job.jobId}: ${job.status}`;
-            pendingApprovalJob = job.status === "pending_review" ? job : null;
+            pendingApprovalJob = job.status === "pending_review" && job.canApprove ? job : null;
             approveJobButton.hidden = !pendingApprovalJob;
             while (true) {
                 if (generation !== watchGeneration || currentDatabase?.id !== job.databaseId) return;
                 const current = await requestJSON(`/api/databases/${job.databaseId}/jobs/${job.jobId}`);
                 if (generation !== watchGeneration || currentDatabase?.id !== job.databaseId) return;
                 await loadExecutionHistory();
-                pendingApprovalJob = current.status === "pending_review" ? current : null;
+                pendingApprovalJob = current.status === "pending_review" && current.canApprove ? current : null;
                 approveJobButton.hidden = !pendingApprovalJob;
                 editorStatus.textContent = `Job ${current.jobId}: ${current.status}; ${current.batchesDone} batches, ${current.rowsDone} rows committed${current.errorMessage ? ` — ${current.errorMessage}` : ""}`;
                 if (!["pending_review", "pending", "running"].includes(current.status)) {
